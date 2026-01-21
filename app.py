@@ -235,9 +235,24 @@ if st.button("➕ Add to Watchlist"):
 
 if st.session_state.watchlist:
     watch_df = df[df["Symbol"].isin(st.session_state.watchlist)]
+
     st.dataframe(
         watch_df[display_cols].sort_values("Rel Value (bps)", ascending=False),
         use_container_width=True
     )
+
+    # ---- Remove bonds from watchlist ----
+    st.markdown("**Remove bonds from watchlist:**")
+
+    to_remove = st.multiselect(
+        "Select bonds to remove",
+        options=st.session_state.watchlist
+    )
+
+    if st.button("❌ Remove selected"):
+        st.session_state.watchlist = [
+            b for b in st.session_state.watchlist if b not in to_remove
+        ]
+
 else:
-    st.info("Watchlist is empty.")
+    st.info("Watchlist is empty. Use search or paste from Excel.")
