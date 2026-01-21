@@ -208,6 +208,11 @@ st.dataframe(
 # WATCHLIST (PASTE FROM EXCEL)
 # =====================================================
 st.subheader("Watchlist")
+# =====================================================
+# WATCHLIST
+# =====================================================
+st.subheader("Watchlist")
+
 # ---- Quick search & add (autocomplete) ----
 all_symbols = sorted(df["Symbol"].unique())
 
@@ -220,6 +225,8 @@ quick_add = st.selectbox(
 if quick_add:
     if quick_add not in st.session_state.watchlist:
         st.session_state.watchlist.append(quick_add)
+
+# ---- Paste from Excel ----
 st.markdown("**Paste bond symbols (one per line) from Excel:**")
 
 paste_input = st.text_area(
@@ -227,103 +234,103 @@ paste_input = st.text_area(
     placeholder="754GS2036\n699GS2051\n726KA25"
 )
 
-if st.button("➕ Add to Watchlist"):
+if st.button("➕ Add pasted bonds"):
     pasted = [x.strip().upper() for x in paste_input.splitlines() if x.strip()]
     st.session_state.watchlist = list(
-        set(st.session_state.watchlist + pasted)
+        dict.fromkeys(st.session_state.watchlist + pasted)
     )
 
+# ---- Display watchlist & alerts ----
 if st.session_state.watchlist:
-   watch_df = df[df["Symbol"].isin(st.session_state.watchlist)].copy()
+    watch_df = df[df["Symbol"].isin(st.session_state.watchlist)].copy()
 
-# ---- Alert inputs ----
-st.markdown("### Alert Setup")
+    # ---------- Alert setup ----------
+    st.markdown("### Alert Setup")
 
-if "alerts" not in st.session_state:
-    st.session_state.alerts = {}
+    if "alerts" not in st.session_state:
+        st.session_state.alerts = {}
 
-for sym in watch_df["Symbol"]:
-    if sym not in st.session_state.alerts:
-        st.session_state.alerts[sym] = {
-            "side": "SELL",
-            "target": None,
-            "tolerance": 0.02
-        }
+    for sym in watch_df["Symbol"]:
+        if sym not in st.session_state.alerts:
+            st.session_state.alerts[sym] = {
+                "side": "SELL",
+                "target": 0.0,
+                "tolerance": 0.02
+            }
 
-for sym in watch_df["Symbol"]:
-    col1, col2, col3 = st.columns([1, 1, 1])
+    for sym in watch_df["Symbol"]:
+        c1, c2, c3 = st.columns([1, 1, 1])
 
-    with col1:
-        st.session_state.alerts[sym]["side"] = st.selectbox(
-            f"{sym} Side",
-            ["SELL", "BUY"],
-            index=0 if st.session_state.alerts[sym]["side"] == "SELL" else 1,
-            key=f"{sym}_side"
-        )
+        with c1:
+            st.session_state.alerts[sym]["side"] = st.selectbox(
+                f"{sym} Side",
+                ["SELL", "BUY"],
+                key=f"{sym}_side"
+            )
 
-    with col2:
-        st.session_state.alerts[sym]["target"] = st.number_input(
-            f"{sym} Target",
-            value=st.session_state.alerts[sym]["target"] or 0.0,
-            format="%.2f",
-            key=f"{sym}_target"
-        )
+        with c2:
+            st.session_state.alerts[sym]["target"] = st.number_input(
+                f"{sym} Target",
+                value=st.session_state.alerts[sym]["target"],
+                format="%.2f",
+                key=f"{sym}_target"
+            )
 
-    with col3:
-        st.session_state.alerts[sym]["tolerance"] = st.number_input(
-            f"{sym} Tolerance",
-            value=st.session_state.alerts[sym]["tolerance"],
-            format="%.2f",
-            key=f"{sym}_tol"
-        )
+        with c3:
+            st.session_state.alerts[sym]["tolerance"] = st.number_input(
+                f"{sym} Tolerance",
+                value=st.session_state.alerts[sym]["tolerance"],
+                format="%.2f",
+                key=f"{sym}_tol"
+            )
 
-# ---- Compute alert status ----
-def alert_status(row):
-    a = st.session_state.alerts.get(row["Symbol"])
-    if not a or not a["target"]:
-        return "—"
+    # ---------- Alert logic ----------
+    def alert_status(row):
+        a = st.session_state.alerts.get(row["Symbol"])
+        if not a or a["target"] == 0:
+            return "—"
 
-    side = a["side"]
-    target = a["target"]
-    tol = a["tolerance"]
+        side = a["side"]
+        target = a["target"]
+        tol = a["tolerance"]
 
-    if side == "SELL":
-        px = row["Bid"]
-        if px >= target:
-            return "HIT"
-        elif target - px <= tol:
-            return "NEAR"
-        else:
-            return "FAR"
+        if side == "SELL":
+            px = row["Bid"]
+            if px >= target:
+                return "HIT"
+            elif target - px <= tol:
+                return "NEAR"
+            else:
+                return "FAR"
 
-    if side == "BUY":
-        px = row["Ask"]
-        if px <= target:
-            return "HIT"
-        elif px - target <= tol:
-            return "NEAR"
-        else:
-            return "FAR"
+        if side == "BUY":
+            px = row["Ask"]
+            if px <= target:
+                return "HIT"
+            elif px - target <= tol:
+                return "NEAR"
+            else:
+                return "FAR"
 
-watch_df["ALERT STATUS"] = watch_df.apply(alert_status, axis=1)
+    watch_df["ALERT STATUS"] = watch_df.apply(alert_status, axis=1)
 
-# ---- Styling ----
-def alert_style(val):
-    if val == "HIT":
-        return "background-color: #ff4d4d; color: white;"
-    if val == "NEAR":
-        return "background-color: #ffa500; color: black;"
-    if val == "FAR":
-        return "background-color: #e0e0e0;"
-    return ""
+    # ---------- Styling ----------
+    def alert_style(val):
+        if val == "HIT":
+            return "background-color: #ff4d4d; color: white;"
+        if val == "NEAR":
+            return "background-color: #ffa500; color: black;"
+        if val == "FAR":
+            return "background-color: #e0e0e0;"
+        return ""
 
-st.dataframe(
-    watch_df[display_cols + ["ALERT STATUS"]]
-    .style.applymap(alert_style, subset=["ALERT STATUS"]),
-    use_container_width=True
-)
+    st.dataframe(
+        watch_df[display_cols + ["ALERT STATUS"]]
+        .style.applymap(alert_style, subset=["ALERT STATUS"]),
+        use_container_width=True
+    )
 
-    # ---- Remove bonds from watchlist ----
+    # ---------- Remove bonds ----------
     st.markdown("**Remove bonds from watchlist:**")
 
     to_remove = st.multiselect(
