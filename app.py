@@ -1,12 +1,15 @@
 import streamlit as st
 import pandas as pd
 import requests
+import time
 from datetime import datetime
 
 # ---------------- PAGE SETUP ----------------
 st.set_page_config(page_title="Live Bond Market", layout="wide")
 st.title("Composite Edge – Live Bond Market")
 st.caption(f"Last updated: {datetime.now().strftime('%H:%M:%S')}")
+time.sleep(5)
+st.experimental_rerun()
 
 # ---------------- LIVE NSE DATA ----------------
 @st.cache_data(ttl=5)
