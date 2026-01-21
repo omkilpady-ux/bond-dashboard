@@ -34,7 +34,7 @@ def fetch_master_debt():
         df = pd.read_csv(StringIO(response.text))
     except:
         st.warning("Using cached master debt file")
-return pd.read_csv("master_debt.csv")
+        return pd.read_csv("master_debt.csv")
 
     df = df[["SYMBOL", " IP RATE", " REDEMPTION DATE"]]
     df.rename(columns={"SYMBOL": "Symbol"}, inplace=True)
@@ -57,6 +57,7 @@ return pd.read_csv("master_debt.csv")
     ).dt.days / 365
 
     return df
+
 
 # ---------------- LIVE NSE DATA ----------------
 @st.cache_data(ttl=5)
