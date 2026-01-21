@@ -80,7 +80,7 @@ with tabs[3]:
         options=bond_options,
         default=[
             "754GS2036",
-            "699GS2051"
+            "725GS2063"
         ]
     )
 
