@@ -1,20 +1,23 @@
 import streamlit as st
 import pandas as pd
 import requests
-from datetime import datetime
+import numpy_financial as npf
+from datetime import datetime, timedelta
+from dateutil.relativedelta import relativedelta
 
-# ---------------- PAGE CONFIG ----------------
+# ================= PAGE SETUP =================
 st.set_page_config(page_title="Bond Market Monitor", layout="wide")
 st.title("Composite Edge – Bond Market Monitor")
+st.caption(f"Last updated: {datetime.now().strftime('%H:%M:%S')}")
 
-# ---------------- SESSION STATE ----------------
+# ================= SESSION STATE =================
 if "watchlist" not in st.session_state:
     st.session_state.watchlist = []
 
 if "page" not in st.session_state:
     st.session_state.page = "Market"
 
-# ---------------- SIDEBAR NAV ----------------
+# ================= SIDEBAR =================
 st.sidebar.title("Navigation")
 page = st.sidebar.radio(
     "Go to",
@@ -23,15 +26,41 @@ page = st.sidebar.radio(
 )
 st.session_state.page = page
 
-# ---------------- REFRESH ----------------
 if st.sidebar.button("🔄 Refresh data"):
     st.cache_data.clear()
 
-st.caption(f"Last updated: {datetime.now().strftime('%H:%M:%S')}")
+# ================= SETTLEMENT DATE =================
+def get_settlement_date():
+    today = datetime.today()
+    if today.weekday() == 4:
+        return today + timedelta(days=3)
+    elif today.weekday() == 5:
+        return today + timedelta(days=2)
+    else:
+        return today + timedelta(days=1)
 
-# ---------------- LIVE NSE DATA ----------------
+SETTLEMENT = get_settlement_date()
+
+# ================= LOAD MASTER DATA =================
+@st.cache_data(ttl=24 * 3600)
+def load_master():
+    df = pd.read_csv("master_debt.csv")
+
+    df.columns = df.columns.str.strip().str.upper()
+    df = df[["SYMBOL", "IP RATE", "REDEMPTION DATE"]]
+    df.rename(columns={"SYMBOL": "Symbol", "IP RATE": "Coupon"}, inplace=True)
+
+    df["Maturity"] = pd.to_datetime(df["REDEMPTION DATE"], errors="coerce", dayfirst=True)
+    df = df.dropna(subset=["Maturity"])
+
+    df["Years to Maturity"] = (df["Maturity"] - SETTLEMENT).dt.days / 365
+    df = df[df["Years to Maturity"] > 0]
+
+    return df
+
+# ================= LOAD LIVE NSE DATA =================
 @st.cache_data(ttl=10)
-def fetch_live_bonds():
+def load_live():
     try:
         session = requests.Session()
         session.headers.update({
@@ -42,8 +71,7 @@ def fetch_live_bonds():
         session.get("https://www.nseindia.com", timeout=10)
 
         url = "https://www.nseindia.com/api/liveBonds-traded-on-cm?type=gsec"
-        resp = session.get(url, timeout=10)
-        data = resp.json().get("data", [])
+        data = session.get(url, timeout=10).json().get("data", [])
 
         rows = []
         for d in data:
@@ -51,9 +79,7 @@ def fetch_live_bonds():
                 "Symbol": d.get("symbol"),
                 "Series": d.get("series"),
                 "Bid": d.get("buyPrice1"),
-                "Bid Qty": d.get("buyQuantity1"),
                 "Ask": d.get("sellPrice1"),
-                "Ask Qty": d.get("sellQuantity1"),
                 "VWAP": d.get("averagePrice"),
                 "Volume": d.get("totalTradedVolume"),
             })
@@ -63,61 +89,54 @@ def fetch_live_bonds():
     except:
         return pd.DataFrame()
 
-df = fetch_live_bonds()
+# ================= LOAD & MERGE =================
+master = load_master()
+live = load_live()
 
-if df.empty:
-    st.warning("Live NSE data not available right now.")
+if master.empty or live.empty:
+    st.warning("Data not available right now.")
     st.stop()
 
-# ---------------- DERIVED METRICS ----------------
-df["Spread"] = df["Ask"] - df["Bid"]
+df = live.merge(master, on="Symbol", how="left")
+df = df[df["Series"].isin(["GS", "SG"])]
+df = df.dropna(subset=["Coupon", "Years to Maturity", "VWAP"])
 
-# Simple yield proxy (NOT full YTM – explainable & safe)
-df["Yield Proxy (%)"] = ((100 - df["VWAP"]) / df["VWAP"]) * 100
+# ================= YTM CALC =================
+def calc_ytm(row):
+    try:
+        return npf.rate(
+            row["Years to Maturity"] * 2,
+            row["Coupon"] / 2,
+            -row["VWAP"],
+            100
+        ) * 2 * 100
+    except:
+        return None
 
-# Liquidity flags
-df["High Volume"] = df["Volume"] > df["Volume"].quantile(0.90)
-df["Large Bid"] = df["Bid Qty"] > df["Bid Qty"].quantile(0.90)
-df["Wide Spread"] = df["Spread"] > df["Spread"].quantile(0.90)
+df["YTM (%)"] = df.apply(calc_ytm, axis=1)
 
-# ---------------- MARKET PAGE ----------------
+# ================= MARKET PAGE =================
 if page == "Market":
-    st.subheader("Market Scanner")
-
-    # Filters
-    col1, col2 = st.columns(2)
-    with col1:
-        series_filter = st.multiselect(
-            "Series",
-            options=sorted(df["Series"].dropna().unique()),
-            default=["GS"]
-        )
-    with col2:
-        min_volume = st.number_input("Minimum Volume", value=0)
-
-    filtered = df[
-        (df["Series"].isin(series_filter)) &
-        (df["Volume"] >= min_volume)
-    ]
+    st.subheader("Market Scanner (with YTM)")
 
     st.dataframe(
-        filtered.sort_values("Volume", ascending=False),
+        df.sort_values("Volume", ascending=False),
         use_container_width=True
     )
 
     st.info(
-        "Use this page to scan for liquidity, wide spreads, and active bonds. "
-        "Execution happens on the trading terminal."
+        "YTM is calculated using live prices and cached bond reference data. "
+        "Use this page to scan relative value and liquidity."
     )
 
-# ---------------- WATCHLIST PAGE ----------------
+# ================= WATCHLIST PAGE =================
 if page == "Watchlist":
     st.subheader("Bond Watchlist")
 
-    all_bonds = sorted(df["Symbol"].dropna().unique())
+    all_bonds = sorted(df["Symbol"].unique())
 
     selected = st.multiselect(
-        "Select bonds to track",
+        "Select bonds",
         options=all_bonds,
         default=st.session_state.watchlist
     )
@@ -125,18 +144,11 @@ if page == "Watchlist":
     st.session_state.watchlist = selected
 
     if not selected:
-        st.info("Add bonds to build your watchlist.")
+        st.info("Add bonds to track.")
     else:
         watch_df = df[df["Symbol"].isin(selected)]
 
         st.dataframe(
-            watch_df.sort_values("Volume", ascending=False),
+            watch_df.sort_values("YTM (%)", ascending=False),
             use_container_width=True
-        )
-
-        st.markdown("### Liquidity Signals")
-        st.write(
-            watch_df[
-                ["Symbol", "High Volume", "Large Bid", "Wide Spread"]
-            ]
         )
