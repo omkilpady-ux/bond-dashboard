@@ -45,8 +45,8 @@ SETTLEMENT = get_settlement_date()
 @st.cache_data(ttl=24 * 3600)
 def load_master():
     df = pd.read_csv("master_debt.csv")
-
     df.columns = df.columns.str.strip().str.upper()
+
     df = df[["SYMBOL", "IP RATE", "REDEMPTION DATE"]]
     df.rename(columns={"SYMBOL": "Symbol", "IP RATE": "Coupon"}, inplace=True)
 
@@ -85,7 +85,6 @@ def load_live():
             })
 
         return pd.DataFrame(rows)
-
     except:
         return pd.DataFrame()
 
@@ -101,13 +100,29 @@ df = live.merge(master, on="Symbol", how="left")
 df = df[df["Series"].isin(["GS", "SG"])]
 df = df.dropna(subset=["Coupon", "Years to Maturity", "VWAP"])
 
-# ================= YTM CALC =================
+# ================= ACCRUED INTEREST =================
+def last_coupon_date(maturity):
+    dt = maturity
+    while dt > SETTLEMENT:
+        dt -= relativedelta(months=6)
+    return dt
+
+df["Last Coupon Date"] = df["Maturity"].apply(last_coupon_date)
+df["Days Since Coupon"] = (SETTLEMENT - df["Last Coupon Date"]).dt.days
+df["Days in Period"] = 182
+
+df["Accrued Interest"] = df["Coupon"] * (df["Days Since Coupon"] / df["Days in Period"])
+
+df["Dirty Price"] = df["VWAP"]
+df["Clean Price"] = df["Dirty Price"] - df["Accrued Interest"]
+
+# ================= YTM =================
 def calc_ytm(row):
     try:
         return npf.rate(
             row["Years to Maturity"] * 2,
             row["Coupon"] / 2,
-            -row["VWAP"],
+            -row["Clean Price"],
             100
         ) * 2 * 100
     except:
@@ -115,40 +130,17 @@ def calc_ytm(row):
 
 df["YTM (%)"] = df.apply(calc_ytm, axis=1)
 
-# ================= MARKET PAGE =================
-if page == "Market":
-    st.subheader("Market Scanner (with YTM)")
-
-    st.dataframe(
-        df.sort_values("Volume", ascending=False),
-        use_container_width=True
-    )
-
-    st.info(
-        "YTM is calculated using live prices and cached bond reference data. "
-        "Use this page to scan relative value and liquidity."
-    )
-
-# ================= WATCHLIST PAGE =================
-if page == "Watchlist":
-    st.subheader("Bond Watchlist")
-
-    all_bonds = sorted(df["Symbol"].unique())
-
-    selected = st.multiselect(
-        "Select bonds",
-        options=all_bonds,
-        default=st.session_state.watchlist
-    )
-
-    st.session_state.watchlist = selected
-
-    if not selected:
-        st.info("Add bonds to track.")
+# ================= MATURITY BUCKETS =================
+def maturity_bucket(y):
+    if y < 3:
+        return "0–3Y"
+    elif y < 5:
+        return "3–5Y"
+    elif y < 7:
+        return "5–7Y"
+    elif y < 10:
+        return "7–10Y"
     else:
-        watch_df = df[df["Symbol"].isin(selected)]
+        return "10Y+"
 
-        st.dataframe(
-            watch_df.sort_values("YTM (%)", ascending=False),
-            use_container_width=True
-        )
+df
