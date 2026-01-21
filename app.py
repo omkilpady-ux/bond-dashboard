@@ -208,7 +208,18 @@ st.dataframe(
 # WATCHLIST (PASTE FROM EXCEL)
 # =====================================================
 st.subheader("Watchlist")
+# ---- Quick search & add (autocomplete) ----
+all_symbols = sorted(df["Symbol"].unique())
 
+quick_add = st.selectbox(
+    "Quick add (type to search)",
+    options=[""] + all_symbols,
+    index=0
+)
+
+if quick_add:
+    if quick_add not in st.session_state.watchlist:
+        st.session_state.watchlist.append(quick_add)
 st.markdown("**Paste bond symbols (one per line) from Excel:**")
 
 paste_input = st.text_area(
