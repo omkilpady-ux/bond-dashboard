@@ -48,12 +48,17 @@ def load_master():
     settlement = get_settlement_date()
 
     def last_coupon(red):
-        rd = datetime.strptime(red, "%d-%b-%Y")
-        while rd > settlement:
-            rd -= relativedelta(months=6)
-        return rd
+    try:
+        rd = pd.to_datetime(red, dayfirst=True)
+    except:
+        return None
+
+    while rd > settlement:
+        rd -= relativedelta(months=6)
+    return rd
 
     df["Last Coupon"] = df["REDEMPTION DATE"].apply(last_coupon)
+    df = df.dropna(subset=["Last Coupon"])
     df["Days Accrued"] = df["Last Coupon"].apply(
         lambda x: days360(x, settlement, method="US")
     )
