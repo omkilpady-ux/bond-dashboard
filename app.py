@@ -2,15 +2,19 @@ import streamlit as st
 import pandas as pd
 import requests
 from datetime import datetime
-from streamlit_autorefresh import st_autorefresh
+
 # ---------------- PAGE SETUP ----------------
 st.set_page_config(page_title="Live Bond Market", layout="wide")
 st.title("Composite Edge – Live Bond Market")
+
+# Manual refresh button
+if st.button("🔄 Refresh now"):
+    st.cache_data.clear()
+
 st.caption(f"Last updated: {datetime.now().strftime('%H:%M:%S')}")
-st_autorefresh(interval=5000, key="bond_refresh")
 
 # ---------------- LIVE NSE DATA ----------------
-@st.cache_data(ttl=5)
+@st.cache_data(ttl=10)
 def fetch_live_bonds():
     try:
         session = requests.Session()
@@ -19,7 +23,7 @@ def fetch_live_bonds():
             "Accept": "application/json"
         })
 
-        # Warm-up call (NSE requirement)
+        # NSE warm-up
         session.get("https://www.nseindia.com", timeout=10)
 
         url = "https://www.nseindia.com/api/liveBonds-traded-on-cm?type=gsec"
@@ -41,14 +45,14 @@ def fetch_live_bonds():
 
         return pd.DataFrame(rows)
 
-    except Exception as e:
+    except:
         return pd.DataFrame()
 
 # ---------------- LOAD DATA ----------------
-live = fetch_live_bonds()
+df = fetch_live_bonds()
 
-if not isinstance(live, pd.DataFrame) or live.empty:
-    st.warning("Live NSE data not available right now. Retrying automatically.")
+if df.empty:
+    st.warning("Live NSE data not available right now. Click refresh.")
     st.stop()
 
 # ---------------- FILTER TABS ----------------
@@ -56,24 +60,15 @@ tabs = st.tabs(["GS", "SG", "TB", "Selling"])
 
 with tabs[0]:
     st.subheader("Government Securities (GS)")
-    st.dataframe(
-        live[live["Series"] == "GS"],
-        use_container_width=True
-    )
+    st.dataframe(df[df["Series"] == "GS"], use_container_width=True)
 
 with tabs[1]:
     st.subheader("State Government Bonds (SG)")
-    st.dataframe(
-        live[live["Series"] == "SG"],
-        use_container_width=True
-    )
+    st.dataframe(df[df["Series"] == "SG"], use_container_width=True)
 
 with tabs[2]:
     st.subheader("Treasury Bills (TB)")
-    st.dataframe(
-        live[live["Series"] == "TB"],
-        use_container_width=True
-    )
+    st.dataframe(df[df["Series"] == "TB"], use_container_width=True)
 
 with tabs[3]:
     st.subheader("Selling – Liquidity Check")
@@ -86,6 +81,6 @@ with tabs[3]:
     ]
 
     st.dataframe(
-        live[live["Symbol"].isin(sell_list)],
+        df[df["Symbol"].isin(sell_list)],
         use_container_width=True
     )
