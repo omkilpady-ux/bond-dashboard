@@ -47,7 +47,7 @@ def load_master():
 
     settlement = get_settlement_date()
 
-    def last_coupon(red):
+  def last_coupon(red):
     try:
         rd = pd.to_datetime(red, dayfirst=True)
     except:
