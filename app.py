@@ -71,16 +71,23 @@ with tabs[2]:
     st.dataframe(df[df["Series"] == "TB"], use_container_width=True)
 
 with tabs[3]:
-    st.subheader("Selling – Liquidity Check")
+    st.subheader("Selling – Bond Watchlist")
 
-    sell_list = [
-        "754GS2036",
-        "699GS2051",
-        "726KA25",
-        "774GA32"
-    ]
+    bond_options = sorted(df["Symbol"].dropna().unique())
 
-    st.dataframe(
-        df[df["Symbol"].isin(sell_list)],
-        use_container_width=True
+    selected_bonds = st.multiselect(
+        "Select bonds to track",
+        options=bond_options,
+        default=[
+            "754GS2036",
+            "699GS2051"
+        ]
     )
+
+    if selected_bonds:
+        st.dataframe(
+            df[df["Symbol"].isin(selected_bonds)],
+            use_container_width=True
+        )
+    else:
+        st.info("Select bonds from the list above.")
