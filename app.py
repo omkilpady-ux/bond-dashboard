@@ -111,10 +111,22 @@ def calc_yield(row, price):
 master = fetch_master_debt()
 live = fetch_live_bonds()
 
-if master.empty or live.empty:
+# Safety checks (VERY IMPORTANT)
+if master.empty:
+    st.error("Master bond data not available. Check master_debt.csv.")
     st.stop()
 
+if live.empty:
+    st.error("Live NSE data not available.")
+    st.stop()
+
+# Clean column names just in case
+master.columns = master.columns.str.strip()
+live.columns = live.columns.str.strip()
+
+# Merge
 df = live.merge(master, on="Symbol", how="left")
+
 df = df[df["Volume"] > 0]
 
 df["Clean Bid"] = df["Bid"] - df["Accrued Interest"]
@@ -122,6 +134,31 @@ df["Clean Ask"] = df["Ask"] - df["Accrued Interest"]
 
 df["Bid Yield %"] = df.apply(lambda x: calc_yield(x, x["Clean Bid"]), axis=1)
 df["Ask Yield %"] = df.apply(lambda x: calc_yield(x, x["Clean Ask"]), axis=1)
+
+# ---------------- FILTER TABS ----------------
+tabs = st.tabs(["GS", "SG", "TB", "Selling"])
+
+with tabs[0]:
+    st.subheader("Government Securities (GS)")
+    st.dataframe(df[df["Series"] == "GS"], use_container_width=True)
+
+with tabs[1]:
+    st.subheader("State Government Bonds (SG)")
+    st.dataframe(df[df["Series"] == "SG"], use_container_width=True)
+
+with tabs[2]:
+    st.subheader("Treasury Bills (TB)")
+    st.dataframe(df[df["Series"] == "TB"], use_container_width=True)
+
+with tabs[3]:
+    st.subheader("Selling – Liquidity Check")
+    sell_list = [
+        "754GS2036",
+        "699GS2051",
+        "726KA25",
+        "774GA32"
+    ]
+    st.dataframe(df[df["Symbol"].isin(sell_list)], use_container_width=True)
 
 # ---------------- FILTER TABS ----------------
 tabs = st.tabs(["GS", "SG", "TB", "Selling"])
