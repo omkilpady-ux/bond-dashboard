@@ -117,7 +117,7 @@ def load_live():
     "LTP": d.get("lastPrice"),
     "Dirty Price": d.get("lastPrice") if d.get("lastPrice", 0) != 0 else d.get("averagePrice"),
     "Volume": d.get("totalTradedVolume"),
-        return pd.DataFrame(rows)
+})
 
     except:
         return pd.DataFrame()
