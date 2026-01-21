@@ -33,8 +33,8 @@ def fetch_master_debt():
         response.raise_for_status()
         df = pd.read_csv(StringIO(response.text))
     except:
-        st.warning("NSE master file slow – retry on next refresh")
-        return pd.DataFrame()
+        st.warning("Using cached master debt file")
+return pd.read_csv("master_debt.csv")
 
     df = df[["SYMBOL", " IP RATE", " REDEMPTION DATE"]]
     df.rename(columns={"SYMBOL": "Symbol"}, inplace=True)
