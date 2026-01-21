@@ -5,16 +5,22 @@ import numpy_financial as npf
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 
-# ================= PAGE SETUP =================
+# =====================================================
+# PAGE SETUP
+# =====================================================
 st.set_page_config(page_title="Bond Market Monitor", layout="wide")
 st.title("Composite Edge – Bond Market Monitor")
 st.caption(f"Last updated: {datetime.now().strftime('%H:%M:%S')}")
 
-# ================= SESSION STATE =================
+# =====================================================
+# SESSION STATE
+# =====================================================
 if "watchlist" not in st.session_state:
     st.session_state.watchlist = []
 
-# ================= SIDEBAR =================
+# =====================================================
+# SIDEBAR CONTROLS
+# =====================================================
 st.sidebar.title("Controls")
 
 series_filter = st.sidebar.multiselect(
@@ -26,20 +32,42 @@ series_filter = st.sidebar.multiselect(
 if st.sidebar.button("🔄 Refresh data"):
     st.cache_data.clear()
 
-# ================= INDIAN SETTLEMENT DATE (T+1) =================
+# =====================================================
+# INDIAN SETTLEMENT DATE (T+1, WEEKEND ADJUSTED)
+# =====================================================
 def get_settlement_date():
     today = datetime.today().date()
     wd = today.weekday()
-    if wd <= 3:
+    if wd <= 3:      # Mon–Thu
         return today + timedelta(days=1)
-    elif wd == 4:
+    elif wd == 4:    # Friday
         return today + timedelta(days=3)
-    else:
+    else:            # Saturday
         return today + timedelta(days=2)
 
 SETTLEMENT = get_settlement_date()
 
-# ================= MASTER DATA =================
+# =====================================================
+# 30/360 US DAY COUNT (MANUAL, NO LIBRARIES)
+# =====================================================
+def days360_us(start_date, end_date):
+    d1 = start_date.day
+    d2 = end_date.day
+    m1 = start_date.month
+    m2 = end_date.month
+    y1 = start_date.year
+    y2 = end_date.year
+
+    if d1 == 31:
+        d1 = 30
+    if d2 == 31 and d1 == 30:
+        d2 = 30
+
+    return (360 * (y2 - y1)) + (30 * (m2 - m1)) + (d2 - d1)
+
+# =====================================================
+# LOAD MASTER DATA (STATIC)
+# =====================================================
 @st.cache_data(ttl=24 * 3600)
 def load_master():
     df = pd.read_csv("master_debt.csv")
@@ -62,7 +90,9 @@ def load_master():
 
     return df
 
-# ================= LIVE NSE DATA =================
+# =====================================================
+# LOAD LIVE NSE DATA
+# =====================================================
 @st.cache_data(ttl=5)
 def load_live():
     try:
@@ -71,6 +101,7 @@ def load_live():
             "User-Agent": "Mozilla/5.0",
             "Accept": "application/json"
         })
+
         session.get("https://www.nseindia.com", timeout=10)
 
         url = "https://www.nseindia.com/api/liveBonds-traded-on-cm?type=gsec"
@@ -88,10 +119,13 @@ def load_live():
             })
 
         return pd.DataFrame(rows)
+
     except:
         return pd.DataFrame()
 
-# ================= LOAD & MERGE =================
+# =====================================================
+# LOAD & MERGE
+# =====================================================
 master = load_master()
 live = load_live()
 
@@ -103,15 +137,9 @@ df = live.merge(master, on="Symbol", how="left")
 df = df[df["Series"].isin(series_filter)]
 df = df.dropna(subset=["Coupon", "Years to Maturity", "Dirty Price"])
 
-# ================= ACCRUED INTEREST =================
-def last_coupon_date(redemption):
-    dt = redemption
-    while dt > SETTLEMENT:
-        dt -= relativedelta(months=6)
-    return dt
-
-# ================= ACCRUED INTEREST (30/360 – MATCHES EXCEL) =================
-
+# =====================================================
+# ACCRUED INTEREST (MATCHES EXCEL EXACTLY)
+# =====================================================
 def last_coupon_date(redemption):
     dt = redemption
     while dt > SETTLEMENT:
@@ -121,17 +149,18 @@ def last_coupon_date(redemption):
 df["Last Coupon Date"] = df["REDEMPTION DATE"].apply(last_coupon_date)
 
 df["Days Since Coupon"] = df.apply(
-    lambda x: days360(x["Last Coupon Date"], SETTLEMENT, method="US"),
+    lambda x: days360_us(x["Last Coupon Date"], SETTLEMENT),
     axis=1
 )
 
-# Coupon is annual %, price per 100 face value
+# Coupon is annual %, price per 100
 df["Accrued Interest"] = df["Days Since Coupon"] * df["Coupon"] / 360
-
 
 df["Clean Price"] = df["Dirty Price"] - df["Accrued Interest"]
 
-# ================= YTM =================
+# =====================================================
+# YTM (CLEAN PRICE)
+# =====================================================
 def calc_ytm(row):
     try:
         return npf.rate(
@@ -145,12 +174,16 @@ def calc_ytm(row):
 
 df["YTM (%)"] = df.apply(calc_ytm, axis=1)
 
-# ================= RELATIVE VALUE =================
+# =====================================================
+# RELATIVE VALUE (WITHIN SERIES)
+# =====================================================
 df["Rel Value (bps)"] = (
     df["YTM (%)"] - df.groupby("Series")["YTM (%)"].transform("mean")
 ) * 100
 
-# ================= MARKET VIEW =================
+# =====================================================
+# MARKET VIEW
+# =====================================================
 st.subheader("Market View")
 
 display_cols = [
@@ -171,24 +204,29 @@ st.dataframe(
     use_container_width=True
 )
 
-# ================= WATCHLIST =================
+# =====================================================
+# WATCHLIST (PASTE FROM EXCEL)
+# =====================================================
 st.subheader("Watchlist")
 
-all_bonds = sorted(df["Symbol"].unique())
+st.markdown("**Paste bond symbols (one per line) from Excel:**")
 
-selected = st.multiselect(
-    "Select bonds",
-    options=all_bonds,
-    default=st.session_state.watchlist
+paste_input = st.text_area(
+    "Paste symbols here",
+    placeholder="754GS2036\n699GS2051\n726KA25"
 )
 
-st.session_state.watchlist = selected
+if st.button("➕ Add to Watchlist"):
+    pasted = [x.strip().upper() for x in paste_input.splitlines() if x.strip()]
+    st.session_state.watchlist = list(
+        set(st.session_state.watchlist + pasted)
+    )
 
-if selected:
-    watch_df = df[df["Symbol"].isin(selected)]
+if st.session_state.watchlist:
+    watch_df = df[df["Symbol"].isin(st.session_state.watchlist)]
     st.dataframe(
         watch_df[display_cols].sort_values("Rel Value (bps)", ascending=False),
         use_container_width=True
     )
 else:
-    st.info("Add bonds to your watchlist.")
+    st.info("Watchlist is empty.")
