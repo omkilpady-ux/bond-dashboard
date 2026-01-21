@@ -72,31 +72,36 @@ def last_coupon(red):
 # ---------------- LIVE NSE DATA ----------------
 @st.cache_data(ttl=5)
 def load_live():
-    session = requests.Session()
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0",
-        "Accept": "application/json"
-    })
-
-    session.get("https://www.nseindia.com")
-
-    url = "https://www.nseindia.com/api/liveBonds-traded-on-cm?type=gsec"
-    data = session.get(url, timeout=10).json()["data"]
-
-    rows = []
-    for d in data:
-        rows.append({
-            "Symbol": d["symbol"].strip(),
-            "Series": d["series"],
-            "Bid": d["buyPrice1"],
-            "Bid Qty": d["buyQuantity1"],
-            "Ask": d["sellPrice1"],
-            "Ask Qty": d["sellQuantity1"],
-            "VWAP": d["averagePrice"],
-            "Volume": d["totalTradedVolume"],
+    try:
+        session = requests.Session()
+        session.headers.update({
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "application/json"
         })
 
-    return pd.DataFrame(rows)
+        session.get("https://www.nseindia.com")
+
+        url = "https://www.nseindia.com/api/liveBonds-traded-on-cm?type=gsec"
+        resp = session.get(url, timeout=10)
+        data = resp.json().get("data", [])
+
+        rows = []
+        for d in data:
+            rows.append({
+                "Symbol": str(d.get("symbol", "")).strip(),
+                "Series": d.get("series"),
+                "Bid": d.get("buyPrice1"),
+                "Bid Qty": d.get("buyQuantity1"),
+                "Ask": d.get("sellPrice1"),
+                "Ask Qty": d.get("sellQuantity1"),
+                "VWAP": d.get("averagePrice"),
+                "Volume": d.get("totalTradedVolume"),
+            })
+
+        return pd.DataFrame(rows)
+
+    except:
+        return pd.DataFrame()
 
 # ---------------- YIELD FUNCTION ----------------
 def calc_yield(row, price):
