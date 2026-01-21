@@ -3,12 +3,28 @@ import pandas as pd
 import requests
 from datetime import datetime
 
-# ---------------- PAGE SETUP ----------------
-st.set_page_config(page_title="Live Bond Market", layout="wide")
-st.title("Composite Edge – Live Bond Market")
+# ---------------- PAGE CONFIG ----------------
+st.set_page_config(page_title="Bond Market Monitor", layout="wide")
+st.title("Composite Edge – Bond Market Monitor")
 
-# Manual refresh button
-if st.button("🔄 Refresh now"):
+# ---------------- SESSION STATE ----------------
+if "watchlist" not in st.session_state:
+    st.session_state.watchlist = []
+
+if "page" not in st.session_state:
+    st.session_state.page = "Market"
+
+# ---------------- SIDEBAR NAV ----------------
+st.sidebar.title("Navigation")
+page = st.sidebar.radio(
+    "Go to",
+    ["Market", "Watchlist"],
+    index=0 if st.session_state.page == "Market" else 1
+)
+st.session_state.page = page
+
+# ---------------- REFRESH ----------------
+if st.sidebar.button("🔄 Refresh data"):
     st.cache_data.clear()
 
 st.caption(f"Last updated: {datetime.now().strftime('%H:%M:%S')}")
@@ -23,7 +39,6 @@ def fetch_live_bonds():
             "Accept": "application/json"
         })
 
-        # NSE warm-up
         session.get("https://www.nseindia.com", timeout=10)
 
         url = "https://www.nseindia.com/api/liveBonds-traded-on-cm?type=gsec"
@@ -35,9 +50,9 @@ def fetch_live_bonds():
             rows.append({
                 "Symbol": d.get("symbol"),
                 "Series": d.get("series"),
-                "Bid Price": d.get("buyPrice1"),
+                "Bid": d.get("buyPrice1"),
                 "Bid Qty": d.get("buyQuantity1"),
-                "Ask Price": d.get("sellPrice1"),
+                "Ask": d.get("sellPrice1"),
                 "Ask Qty": d.get("sellQuantity1"),
                 "VWAP": d.get("averagePrice"),
                 "Volume": d.get("totalTradedVolume"),
@@ -48,46 +63,80 @@ def fetch_live_bonds():
     except:
         return pd.DataFrame()
 
-# ---------------- LOAD DATA ----------------
 df = fetch_live_bonds()
 
 if df.empty:
-    st.warning("Live NSE data not available right now. Click refresh.")
+    st.warning("Live NSE data not available right now.")
     st.stop()
 
-# ---------------- FILTER TABS ----------------
-tabs = st.tabs(["GS", "SG", "TB", "Selling"])
+# ---------------- DERIVED METRICS ----------------
+df["Spread"] = df["Ask"] - df["Bid"]
 
-with tabs[0]:
-    st.subheader("Government Securities (GS)")
-    st.dataframe(df[df["Series"] == "GS"], use_container_width=True)
+# Simple yield proxy (NOT full YTM – explainable & safe)
+df["Yield Proxy (%)"] = ((100 - df["VWAP"]) / df["VWAP"]) * 100
 
-with tabs[1]:
-    st.subheader("State Government Bonds (SG)")
-    st.dataframe(df[df["Series"] == "SG"], use_container_width=True)
+# Liquidity flags
+df["High Volume"] = df["Volume"] > df["Volume"].quantile(0.90)
+df["Large Bid"] = df["Bid Qty"] > df["Bid Qty"].quantile(0.90)
+df["Wide Spread"] = df["Spread"] > df["Spread"].quantile(0.90)
 
-with tabs[2]:
-    st.subheader("Treasury Bills (TB)")
-    st.dataframe(df[df["Series"] == "TB"], use_container_width=True)
+# ---------------- MARKET PAGE ----------------
+if page == "Market":
+    st.subheader("Market Scanner")
 
-with tabs[3]:
-    st.subheader("Selling – Bond Watchlist")
+    # Filters
+    col1, col2 = st.columns(2)
+    with col1:
+        series_filter = st.multiselect(
+            "Series",
+            options=sorted(df["Series"].dropna().unique()),
+            default=["GS"]
+        )
+    with col2:
+        min_volume = st.number_input("Minimum Volume", value=0)
 
-    bond_options = sorted(df["Symbol"].dropna().unique())
+    filtered = df[
+        (df["Series"].isin(series_filter)) &
+        (df["Volume"] >= min_volume)
+    ]
 
-    selected_bonds = st.multiselect(
-        "Select bonds to track",
-        options=bond_options,
-        default=[
-            "754GS2036",
-            "725GS2063"
-        ]
+    st.dataframe(
+        filtered.sort_values("Volume", ascending=False),
+        use_container_width=True
     )
 
-    if selected_bonds:
+    st.info(
+        "Use this page to scan for liquidity, wide spreads, and active bonds. "
+        "Execution happens on the trading terminal."
+    )
+
+# ---------------- WATCHLIST PAGE ----------------
+if page == "Watchlist":
+    st.subheader("Bond Watchlist")
+
+    all_bonds = sorted(df["Symbol"].dropna().unique())
+
+    selected = st.multiselect(
+        "Select bonds to track",
+        options=all_bonds,
+        default=st.session_state.watchlist
+    )
+
+    st.session_state.watchlist = selected
+
+    if not selected:
+        st.info("Add bonds to build your watchlist.")
+    else:
+        watch_df = df[df["Symbol"].isin(selected)]
+
         st.dataframe(
-            df[df["Symbol"].isin(selected_bonds)],
+            watch_df.sort_values("Volume", ascending=False),
             use_container_width=True
         )
-    else:
-        st.info("Select bonds from the list above.")
+
+        st.markdown("### Liquidity Signals")
+        st.write(
+            watch_df[
+                ["Symbol", "High Volume", "Large Bid", "Wide Spread"]
+            ]
+        )
