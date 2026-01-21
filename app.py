@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 from days360 import days360
 
-# ---------------- UI SETUP ----------------
+# ---------------- PAGE SETUP ----------------
 st.set_page_config(page_title="Bond Dashboard", layout="wide")
 st.title("Composite Edge – Live Bond Market")
 st.caption(f"Last updated: {datetime.now().strftime('%H:%M:%S')}")
@@ -16,69 +16,72 @@ st.caption(f"Last updated: {datetime.now().strftime('%H:%M:%S')}")
 def get_settlement_date():
     today = datetime.today()
     wd = today.weekday()
-    if wd == 4:      # Friday
+    if wd == 4:
         return today + timedelta(days=3)
-    elif wd == 5:    # Saturday
+    elif wd == 5:
         return today + timedelta(days=2)
     else:
         return today + timedelta(days=1)
 
-# ---------------- MASTER DEBT (SAFE) ----------------
+# ---------------- MASTER DATA (LOCAL ONLY) ----------------
 @st.cache_data(ttl=3600)
-def fetch_master_debt():
-    url = "https://nsearchives.nseindia.com/content/equities/DEBT.csv"
-
+def load_master():
     try:
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
-        df = pd.read_csv(StringIO(response.text))
+        df = pd.read_csv("master_debt.csv")
     except:
-        st.warning("Using cached master debt file")
-        return pd.read_csv("master_debt.csv")
+        st.error("master_debt.csv not found in repo")
+        st.stop()
 
-    df = df[["SYMBOL", " IP RATE", " REDEMPTION DATE"]]
+    # clean headers HARD
+    df.columns = df.columns.str.strip().str.upper()
+
+    # force required columns
+    required = ["SYMBOL", "IP RATE", "REDEMPTION DATE"]
+    for col in required:
+        if col not in df.columns:
+            st.error(f"Missing column {col} in master_debt.csv")
+            st.stop()
+
+    df = df[required]
     df.rename(columns={"SYMBOL": "Symbol"}, inplace=True)
 
     settlement = get_settlement_date()
 
-    def last_coupon_date(redemption):
-        rd = datetime.strptime(redemption, "%d-%b-%Y")
+    def last_coupon(red):
+        rd = datetime.strptime(red, "%d-%b-%Y")
         while rd > settlement:
             rd -= relativedelta(months=6)
         return rd
 
-    df["Last Coupon"] = df[" REDEMPTION DATE"].apply(last_coupon_date)
+    df["Last Coupon"] = df["REDEMPTION DATE"].apply(last_coupon)
     df["Days Accrued"] = df["Last Coupon"].apply(
         lambda x: days360(x, settlement, method="US")
     )
-    df["Accrued Interest"] = (df[" IP RATE"] / 360) * df["Days Accrued"]
+    df["Accrued Interest"] = (df["IP RATE"] / 360) * df["Days Accrued"]
     df["Years"] = (
-        pd.to_datetime(df[" REDEMPTION DATE"]) - settlement
+        pd.to_datetime(df["REDEMPTION DATE"]) - settlement
     ).dt.days / 365
 
     return df
 
-
 # ---------------- LIVE NSE DATA ----------------
 @st.cache_data(ttl=5)
-def fetch_live_bonds():
+def load_live():
     session = requests.Session()
     session.headers.update({
         "User-Agent": "Mozilla/5.0",
         "Accept": "application/json"
     })
 
-    # warm-up call
     session.get("https://www.nseindia.com")
 
     url = "https://www.nseindia.com/api/liveBonds-traded-on-cm?type=gsec"
-    response = session.get(url, timeout=10)
-    data = response.json()["data"]
+    data = session.get(url, timeout=10).json()["data"]
 
     rows = []
     for d in data:
         rows.append({
-            "Symbol": d["symbol"],
+            "Symbol": d["symbol"].strip(),
             "Series": d["series"],
             "Bid": d["buyPrice1"],
             "Bid Qty": d["buyQuantity1"],
@@ -90,52 +93,46 @@ def fetch_live_bonds():
 
     return pd.DataFrame(rows)
 
-# ---------------- YIELD LOGIC ----------------
+# ---------------- YIELD FUNCTION ----------------
 def calc_yield(row, price):
     if price <= 0 or row["Years"] <= 0:
         return None
 
-    # Coupon bond
-    if row[" IP RATE"] > 0:
+    if row["IP RATE"] > 0:
         return npf.rate(
             row["Years"] * 2,
-            row[" IP RATE"] / 2,
+            row["IP RATE"] / 2,
             -price,
             100
         ) * 2 * 100
 
-    # T-Bill
-    return (100 - price) / price * (365 / (row["Years"] * 365)) * 100
+    return (100 - price) / price * 365 / (row["Years"] * 365) * 100
 
 # ---------------- LOAD DATA ----------------
-master = fetch_master_debt()
-live = fetch_live_bonds()
+master = load_master()
+live = load_live()
 
-# Safety checks (VERY IMPORTANT)
-if master.empty:
-    st.error("Master bond data not available. Check master_debt.csv.")
+# HARD SAFETY
+if master.empty or live.empty:
+    st.error("Data not available")
     st.stop()
 
-if live.empty:
-    st.error("Live NSE data not available.")
-    st.stop()
+# FORCE Symbol consistency
+master["Symbol"] = master["Symbol"].astype(str).str.strip()
+live["Symbol"] = live["Symbol"].astype(str).str.strip()
 
-# Clean column names just in case
-master.columns = master.columns.str.strip()
-live.columns = live.columns.str.strip()
-
-# Merge
+# MERGE (this will NOT KeyError)
 df = live.merge(master, on="Symbol", how="left")
-
 df = df[df["Volume"] > 0]
 
+# CALCS
 df["Clean Bid"] = df["Bid"] - df["Accrued Interest"]
 df["Clean Ask"] = df["Ask"] - df["Accrued Interest"]
 
 df["Bid Yield %"] = df.apply(lambda x: calc_yield(x, x["Clean Bid"]), axis=1)
 df["Ask Yield %"] = df.apply(lambda x: calc_yield(x, x["Clean Ask"]), axis=1)
 
-# ---------------- FILTER TABS ----------------
+# ---------------- TABS ----------------
 tabs = st.tabs(["GS", "SG", "TB", "Selling"])
 
 with tabs[0]:
@@ -160,28 +157,4 @@ with tabs[3]:
     ]
     st.dataframe(df[df["Symbol"].isin(sell_list)], use_container_width=True)
 
-# ---------------- FILTER TABS ----------------
-tabs = st.tabs(["GS", "SG", "TB", "Selling"])
-
-with tabs[0]:
-    st.subheader("Government Securities (GS)")
-    st.dataframe(df[df["Series"] == "GS"], use_container_width=True)
-
-with tabs[1]:
-    st.subheader("State Government Bonds (SG)")
-    st.dataframe(df[df["Series"] == "SG"], use_container_width=True)
-
-with tabs[2]:
-    st.subheader("Treasury Bills (TB)")
-    st.dataframe(df[df["Series"] == "TB"], use_container_width=True)
-
-with tabs[3]:
-    st.subheader("Selling – Liquidity Check")
-    sell_list = [
-        "754GS2036",
-        "699GS2051",
-        "726KA25",
-        "774GA32"
-    ]
-    st.dataframe(df[df["Symbol"].isin(sell_list)], use_container_width=True)
 
