@@ -110,14 +110,13 @@ def load_live():
         rows = []
         for d in data:
             rows.append({
-                "Symbol": d.get("symbol"),
-                "Series": d.get("series"),
-                "Bid": d.get("buyPrice1"),
-                "Ask": d.get("sellPrice1"),
-                "Dirty Price": d.get("averagePrice"),
-                "Volume": d.get("totalTradedVolume"),
-            })
-
+    "Symbol": d.get("symbol"),
+    "Series": d.get("series"),
+    "Bid": d.get("buyPrice1"),
+    "Ask": d.get("sellPrice1"),
+    "LTP": d.get("lastPrice"),
+    "Dirty Price": d.get("lastPrice") if d.get("lastPrice", 0) != 0 else d.get("averagePrice"),
+    "Volume": d.get("totalTradedVolume"),
         return pd.DataFrame(rows)
 
     except:
