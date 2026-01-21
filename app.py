@@ -14,17 +14,14 @@ st.caption(f"Last updated: {datetime.now().strftime('%H:%M:%S')}")
 if "watchlist" not in st.session_state:
     st.session_state.watchlist = []
 
-if "page" not in st.session_state:
-    st.session_state.page = "Market"
-
 # ================= SIDEBAR =================
-st.sidebar.title("Navigation")
-page = st.sidebar.radio(
-    "Go to",
-    ["Market", "Watchlist"],
-    index=0 if st.session_state.page == "Market" else 1
+st.sidebar.title("Controls")
+
+series_filter = st.sidebar.multiselect(
+    "Series",
+    options=["GS", "SG"],
+    default=["GS"]
 )
-st.session_state.page = page
 
 if st.sidebar.button("🔄 Refresh data"):
     st.cache_data.clear()
@@ -33,17 +30,16 @@ if st.sidebar.button("🔄 Refresh data"):
 def get_settlement_date():
     today = datetime.today().date()
     wd = today.weekday()
-
-    if wd <= 3:       # Mon–Thu
+    if wd <= 3:
         return today + timedelta(days=1)
-    elif wd == 4:     # Friday
+    elif wd == 4:
         return today + timedelta(days=3)
-    else:             # Saturday
+    else:
         return today + timedelta(days=2)
 
 SETTLEMENT = get_settlement_date()
 
-# ================= LOAD MASTER DATA =================
+# ================= MASTER DATA =================
 @st.cache_data(ttl=24 * 3600)
 def load_master():
     df = pd.read_csv("master_debt.csv")
@@ -66,8 +62,8 @@ def load_master():
 
     return df
 
-# ================= LOAD LIVE NSE DATA =================
-@st.cache_data(ttl=10)
+# ================= LIVE NSE DATA =================
+@st.cache_data(ttl=5)
 def load_live():
     try:
         session = requests.Session()
@@ -75,7 +71,6 @@ def load_live():
             "User-Agent": "Mozilla/5.0",
             "Accept": "application/json"
         })
-
         session.get("https://www.nseindia.com", timeout=10)
 
         url = "https://www.nseindia.com/api/liveBonds-traded-on-cm?type=gsec"
@@ -88,7 +83,7 @@ def load_live():
                 "Series": d.get("series"),
                 "Bid": d.get("buyPrice1"),
                 "Ask": d.get("sellPrice1"),
-                "VWAP": d.get("averagePrice"),
+                "Dirty Price": d.get("averagePrice"),
                 "Volume": d.get("totalTradedVolume"),
             })
 
@@ -101,12 +96,12 @@ master = load_master()
 live = load_live()
 
 if master.empty or live.empty:
-    st.warning("Data not available right now.")
+    st.warning("Live data not available.")
     st.stop()
 
 df = live.merge(master, on="Symbol", how="left")
-df = df[df["Series"].isin(["GS", "SG"])]
-df = df.dropna(subset=["Coupon", "Years to Maturity", "VWAP"])
+df = df[df["Series"].isin(series_filter)]
+df = df.dropna(subset=["Coupon", "Years to Maturity", "Dirty Price"])
 
 # ================= ACCRUED INTEREST =================
 def last_coupon_date(redemption):
@@ -115,22 +110,13 @@ def last_coupon_date(redemption):
         dt -= relativedelta(months=6)
     return dt
 
-def next_coupon_date(last_coupon):
-    return last_coupon + relativedelta(months=6)
-
 df["Last Coupon Date"] = df["REDEMPTION DATE"].apply(last_coupon_date)
-df["Next Coupon Date"] = df["Last Coupon Date"].apply(next_coupon_date)
-
-df["Days Since Coupon"] = (SETTLEMENT - df["Last Coupon Date"]).apply(lambda x: x.days)
-df["Days Between Coupons"] = (
-    df["Next Coupon Date"] - df["Last Coupon Date"]
-).apply(lambda x: x.days)
-
 df["Accrued Interest"] = (
-    df["Coupon"] * df["Days Since Coupon"] / df["Days Between Coupons"]
+    df["Coupon"]
+    * (SETTLEMENT - df["Last Coupon Date"]).apply(lambda x: x.days)
+    / 182
 )
 
-df["Dirty Price"] = df["VWAP"]
 df["Clean Price"] = df["Dirty Price"] - df["Accrued Interest"]
 
 # ================= YTM =================
@@ -147,60 +133,50 @@ def calc_ytm(row):
 
 df["YTM (%)"] = df.apply(calc_ytm, axis=1)
 
-# ================= MATURITY BUCKETS =================
-def maturity_bucket(y):
-    if y < 3:
-        return "0–3Y"
-    elif y < 5:
-        return "3–5Y"
-    elif y < 7:
-        return "5–7Y"
-    elif y < 10:
-        return "7–10Y"
-    else:
-        return "10Y+"
+# ================= RELATIVE VALUE =================
+df["Rel Value (bps)"] = (
+    df["YTM (%)"] - df.groupby("Series")["YTM (%)"].transform("mean")
+) * 100
 
-df["Bucket"] = df["Years to Maturity"].apply(maturity_bucket)
+# ================= MARKET VIEW =================
+st.subheader("Market View")
 
-bucket_avg = (
-    df.groupby("Bucket")["YTM (%)"]
-    .mean()
-    .reset_index()
-    .rename(columns={"YTM (%)": "Bucket Avg YTM"})
+display_cols = [
+    "Symbol",
+    "Series",
+    "Bid",
+    "Ask",
+    "Volume",
+    "Dirty Price",
+    "Accrued Interest",
+    "Clean Price",
+    "YTM (%)",
+    "Rel Value (bps)"
+]
+
+st.dataframe(
+    df[display_cols].sort_values("Rel Value (bps)", ascending=False),
+    use_container_width=True
 )
 
-df = df.merge(bucket_avg, on="Bucket", how="left")
-df["Rel Value (bps)"] = (df["YTM (%)"] - df["Bucket Avg YTM"]) * 100
+# ================= WATCHLIST =================
+st.subheader("Watchlist")
 
-# ================= MARKET PAGE =================
-if page == "Market":
-    st.subheader("Market Scanner")
+all_bonds = sorted(df["Symbol"].unique())
 
+selected = st.multiselect(
+    "Select bonds",
+    options=all_bonds,
+    default=st.session_state.watchlist
+)
+
+st.session_state.watchlist = selected
+
+if selected:
+    watch_df = df[df["Symbol"].isin(selected)]
     st.dataframe(
-        df.sort_values("Rel Value (bps)", ascending=False),
+        watch_df[display_cols].sort_values("Rel Value (bps)", ascending=False),
         use_container_width=True
     )
-
-# ================= WATCHLIST PAGE =================
-if page == "Watchlist":
-    st.subheader("Bond Watchlist")
-
-    all_bonds = sorted(df["Symbol"].unique())
-
-    selected = st.multiselect(
-        "Select bonds",
-        options=all_bonds,
-        default=st.session_state.watchlist
-    )
-
-    st.session_state.watchlist = selected
-
-    if not selected:
-        st.info("Add bonds to track.")
-    else:
-        watch_df = df[df["Symbol"].isin(selected)]
-
-        st.dataframe(
-            watch_df.sort_values("Rel Value (bps)", ascending=False),
-            use_container_width=True
-        )
+else:
+    st.info("Add bonds to your watchlist.")
