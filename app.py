@@ -47,14 +47,14 @@ def load_master():
 
     settlement = get_settlement_date()
 
-  def last_coupon(red):
-    try:
-        rd = pd.to_datetime(red, dayfirst=True)
-    except:
+def last_coupon(red):
+    rd = pd.to_datetime(red, errors="coerce", dayfirst=True)
+    if pd.isna(rd):
         return None
 
     while rd > settlement:
         rd -= relativedelta(months=6)
+
     return rd
 
     df["Last Coupon"] = df["REDEMPTION DATE"].apply(last_coupon)
