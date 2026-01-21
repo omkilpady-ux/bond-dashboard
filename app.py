@@ -29,15 +29,17 @@ st.session_state.page = page
 if st.sidebar.button("🔄 Refresh data"):
     st.cache_data.clear()
 
-# ================= SETTLEMENT DATE =================
+# ================= INDIAN SETTLEMENT DATE (T+1) =================
 def get_settlement_date():
-    today = datetime.today()
-    if today.weekday() == 4:
-        return today + timedelta(days=3)
-    elif today.weekday() == 5:
-        return today + timedelta(days=2)
-    else:
+    today = datetime.today().date()
+    wd = today.weekday()
+
+    if wd <= 3:       # Mon–Thu
         return today + timedelta(days=1)
+    elif wd == 4:     # Friday
+        return today + timedelta(days=3)
+    else:             # Saturday
+        return today + timedelta(days=2)
 
 SETTLEMENT = get_settlement_date()
 
@@ -50,10 +52,16 @@ def load_master():
     df = df[["SYMBOL", "IP RATE", "REDEMPTION DATE"]]
     df.rename(columns={"SYMBOL": "Symbol", "IP RATE": "Coupon"}, inplace=True)
 
-    df["Maturity"] = pd.to_datetime(df["REDEMPTION DATE"], errors="coerce", dayfirst=True)
-    df = df.dropna(subset=["Maturity"])
+    df["REDEMPTION DATE"] = pd.to_datetime(
+        df["REDEMPTION DATE"], errors="coerce", dayfirst=True
+    ).dt.date
 
-    df["Years to Maturity"] = (df["Maturity"] - SETTLEMENT).dt.days / 365
+    df = df.dropna(subset=["REDEMPTION DATE"])
+
+    df["Years to Maturity"] = (
+        pd.to_datetime(df["REDEMPTION DATE"]) - pd.to_datetime(SETTLEMENT)
+    ).dt.days / 365
+
     df = df[df["Years to Maturity"] > 0]
 
     return df
@@ -101,17 +109,26 @@ df = df[df["Series"].isin(["GS", "SG"])]
 df = df.dropna(subset=["Coupon", "Years to Maturity", "VWAP"])
 
 # ================= ACCRUED INTEREST =================
-def last_coupon_date(maturity):
-    dt = maturity
+def last_coupon_date(redemption):
+    dt = redemption
     while dt > SETTLEMENT:
         dt -= relativedelta(months=6)
     return dt
 
-df["Last Coupon Date"] = df["Maturity"].apply(last_coupon_date)
-df["Days Since Coupon"] = (SETTLEMENT - df["Last Coupon Date"]).dt.days
-df["Days in Period"] = 182
+def next_coupon_date(last_coupon):
+    return last_coupon + relativedelta(months=6)
 
-df["Accrued Interest"] = df["Coupon"] * (df["Days Since Coupon"] / df["Days in Period"])
+df["Last Coupon Date"] = df["REDEMPTION DATE"].apply(last_coupon_date)
+df["Next Coupon Date"] = df["Last Coupon Date"].apply(next_coupon_date)
+
+df["Days Since Coupon"] = (SETTLEMENT - df["Last Coupon Date"]).apply(lambda x: x.days)
+df["Days Between Coupons"] = (
+    df["Next Coupon Date"] - df["Last Coupon Date"]
+).apply(lambda x: x.days)
+
+df["Accrued Interest"] = (
+    df["Coupon"] * df["Days Since Coupon"] / df["Days Between Coupons"]
+)
 
 df["Dirty Price"] = df["VWAP"]
 df["Clean Price"] = df["Dirty Price"] - df["Accrued Interest"]
@@ -143,4 +160,47 @@ def maturity_bucket(y):
     else:
         return "10Y+"
 
-df
+df["Bucket"] = df["Years to Maturity"].apply(maturity_bucket)
+
+bucket_avg = (
+    df.groupby("Bucket")["YTM (%)"]
+    .mean()
+    .reset_index()
+    .rename(columns={"YTM (%)": "Bucket Avg YTM"})
+)
+
+df = df.merge(bucket_avg, on="Bucket", how="left")
+df["Rel Value (bps)"] = (df["YTM (%)"] - df["Bucket Avg YTM"]) * 100
+
+# ================= MARKET PAGE =================
+if page == "Market":
+    st.subheader("Market Scanner")
+
+    st.dataframe(
+        df.sort_values("Rel Value (bps)", ascending=False),
+        use_container_width=True
+    )
+
+# ================= WATCHLIST PAGE =================
+if page == "Watchlist":
+    st.subheader("Bond Watchlist")
+
+    all_bonds = sorted(df["Symbol"].unique())
+
+    selected = st.multiselect(
+        "Select bonds",
+        options=all_bonds,
+        default=st.session_state.watchlist
+    )
+
+    st.session_state.watchlist = selected
+
+    if not selected:
+        st.info("Add bonds to track.")
+    else:
+        watch_df = df[df["Symbol"].isin(selected)]
+
+        st.dataframe(
+            watch_df.sort_values("Rel Value (bps)", ascending=False),
+            use_container_width=True
+        )
