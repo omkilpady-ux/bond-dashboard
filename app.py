@@ -110,12 +110,24 @@ def last_coupon_date(redemption):
         dt -= relativedelta(months=6)
     return dt
 
+# ================= ACCRUED INTEREST (30/360 – MATCHES EXCEL) =================
+
+def last_coupon_date(redemption):
+    dt = redemption
+    while dt > SETTLEMENT:
+        dt -= relativedelta(months=6)
+    return dt
+
 df["Last Coupon Date"] = df["REDEMPTION DATE"].apply(last_coupon_date)
-df["Accrued Interest"] = (
-    df["Coupon"]
-    * (SETTLEMENT - df["Last Coupon Date"]).apply(lambda x: x.days)
-    / 182
+
+df["Days Since Coupon"] = df.apply(
+    lambda x: days360(x["Last Coupon Date"], SETTLEMENT, method="US"),
+    axis=1
 )
+
+# Coupon is annual %, price per 100 face value
+df["Accrued Interest"] = df["Days Since Coupon"] * df["Coupon"] / 360
+
 
 df["Clean Price"] = df["Dirty Price"] - df["Accrued Interest"]
 
