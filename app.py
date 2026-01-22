@@ -284,12 +284,13 @@ if alert_sym:
         tol = st.number_input("Tolerance", value=0.02, format="%.2f")
 
     if st.button("💾 Save Alert"):
-        st.session_state.alerts[alert_sym] = {
-            "side": side,
-            "target": target,
-            "tolerance": tol
-        }
-        save_persistent_state()
+    st.session_state.alerts[alert_sym] = {
+        "side": side,
+        "target": target,
+        "tolerance": tol,
+        "last_status": "FAR"
+    }
+    save_persistent_state()
 
 # =====================================================
 # WATCHLIST TABLE + SOUND
