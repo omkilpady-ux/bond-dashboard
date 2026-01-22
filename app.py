@@ -4,6 +4,7 @@ import requests
 import numpy_financial as npf
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
+import base64
 
 # =====================================================
 # PAGE SETUP
@@ -21,6 +22,9 @@ if "watchlist" not in st.session_state:
 if "alerts" not in st.session_state:
     st.session_state.alerts = {}
 
+if "last_alert_state" not in st.session_state:
+    st.session_state.last_alert_state = {}
+
 # =====================================================
 # SIDEBAR
 # =====================================================
@@ -36,7 +40,7 @@ if st.sidebar.button("🔄 Refresh"):
     st.cache_data.clear()
 
 # =====================================================
-# INDIAN SETTLEMENT DATE (T+1)
+# SETTLEMENT DATE (INDIA T+1)
 # =====================================================
 def get_settlement_date():
     today = datetime.today().date()
@@ -62,6 +66,17 @@ def days360_us(start, end):
     if d2 == 31 and d1 == 30:
         d2 = 30
     return 360 * (y2 - y1) + 30 * (m2 - m1) + (d2 - d1)
+
+# =====================================================
+# SOUND HELPERS
+# =====================================================
+def play_near_sound():
+    beep = "UklGRigAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQQAAA=="
+    st.audio(base64.b64decode(beep), format="audio/wav")
+
+def play_hit_sound():
+    beep = "UklGRlIAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YVIAAAB//38AAP//"
+    st.audio(base64.b64decode(beep), format="audio/wav")
 
 # =====================================================
 # MASTER DATA
@@ -120,13 +135,13 @@ def load_live():
     return pd.DataFrame(rows)
 
 # =====================================================
-# LOAD & MERGE
+# LOAD DATA
 # =====================================================
 master = load_master()
 live = load_live()
 
 if master.empty or live.empty:
-    st.warning("Live data unavailable. Refresh shortly.")
+    st.warning("Live data unavailable. Try refresh.")
     st.stop()
 
 df = live.merge(master, on="Symbol", how="left")
@@ -151,7 +166,7 @@ df["Accrued"] = df["Days Since"] * df["Coupon"] / 360
 df["Clean"] = df["Dirty"] - df["Accrued"]
 
 # =====================================================
-# YTM (CLEAN LTP)
+# YTM
 # =====================================================
 def calc_ytm(r):
     try:
@@ -165,13 +180,12 @@ def calc_ytm(r):
         return None
 
 df["YTM"] = df.apply(calc_ytm, axis=1)
-
 df["RelVal(bps)"] = (
     df["YTM"] - df.groupby("Series")["YTM"].transform("mean")
 ) * 100
 
 # =====================================================
-# ALERT LOGIC (TOP-LEVEL, SAFE)
+# ALERT LOGIC (TOP LEVEL)
 # =====================================================
 def alert_status(r):
     a = st.session_state.alerts.get(r["Symbol"])
@@ -240,14 +254,11 @@ if st.button("➕ Add pasted"):
     ))
 
 # =====================================================
-# ALERT SETUP (CLEAN)
+# ALERT SETUP
 # =====================================================
 st.markdown("### 🎯 Alert Setup")
 
-alert_sym = st.selectbox(
-    "Bond",
-    [""] + st.session_state.watchlist
-)
+alert_sym = st.selectbox("Bond", [""] + st.session_state.watchlist)
 
 if alert_sym:
     c1, c2, c3 = st.columns(3)
@@ -266,11 +277,24 @@ if alert_sym:
         }
 
 # =====================================================
-# WATCHLIST TABLE
+# WATCHLIST TABLE + SOUND
 # =====================================================
 if st.session_state.watchlist:
     wdf = df[df["Symbol"].isin(st.session_state.watchlist)].copy()
     wdf["ALERT"] = wdf.apply(alert_status, axis=1)
+
+    for _, r in wdf.iterrows():
+        sym = r["Symbol"]
+        new = r["ALERT"]
+        old = st.session_state.last_alert_state.get(sym)
+
+        if new != old:
+            if new == "NEAR":
+                play_near_sound()
+            elif new == "HIT":
+                play_hit_sound()
+
+        st.session_state.last_alert_state[sym] = new
 
     def style(v):
         if v == "HIT":
