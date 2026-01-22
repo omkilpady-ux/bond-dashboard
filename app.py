@@ -247,22 +247,33 @@ if alert_symbol:
 if st.session_state.watchlist:
     wdf = df[df["Symbol"].isin(st.session_state.watchlist)].copy()
 
-    def alert_status(r):
-        a = st.session_state.alerts.get(r["Symbol"])
-        if not a:
-            return "—"
-        if a["side"] == "SELL":
-            if r["Bid"] >= a["target"]:
-                return "HIT"
-            if a["target"] - r["Bid"] <= a["tolerance"]:
-                return "NEAR"
-            return "FAR"
+   def alert_status(r):
+    a = st.session_state.alerts.get(r["Symbol"])
+    if not a or a["target"] == 0:
+        return "—"
+
+    side = a["side"]
+    target = a["target"]
+    tol = a["tolerance"]
+
+    if side == "SELL":
+        bid = r["Bid"]
+        if bid >= target:
+            return "HIT"
+        elif (target - bid) <= tol:
+            return "NEAR"
         else:
-            if r["Ask"] <= a["target"]:
-                return "HIT"
-            if r["Ask"] - a["target"] <= a["tolerance"]:
-                return "NEAR"
             return "FAR"
+
+    if side == "BUY":
+        ask = r["Ask"]
+        if ask <= target:
+            return "HIT"
+        elif (ask - target) <= tol:
+            return "NEAR"
+        else:
+            return "FAR"
+
 
     wdf["ALERT STATUS"] = wdf.apply(alert_status, axis=1)
 
