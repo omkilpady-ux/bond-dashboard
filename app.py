@@ -5,6 +5,26 @@ import numpy_financial as npf
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 import base64
+import json
+from pathlib import Path
+
+# =====================================================
+# PERSISTENCE
+# =====================================================
+STATE_FILE = Path("user_state.json")
+
+def load_persistent_state():
+    if STATE_FILE.exists():
+        with open(STATE_FILE, "r") as f:
+            return json.load(f)
+    return {"watchlist": [], "alerts": {}}
+
+def save_persistent_state():
+    with open(STATE_FILE, "w") as f:
+        json.dump({
+            "watchlist": st.session_state.watchlist,
+            "alerts": st.session_state.alerts
+        }, f)
 
 # =====================================================
 # PAGE SETUP
@@ -14,16 +34,14 @@ st.title("Composite Edge – Bond Market Monitor")
 st.caption(f"Last updated: {datetime.now().strftime('%H:%M:%S')}")
 
 # =====================================================
-# SESSION STATE
+# SESSION STATE INIT (PERSISTENT)
 # =====================================================
-if "watchlist" not in st.session_state:
-    st.session_state.watchlist = []
-
-if "alerts" not in st.session_state:
-    st.session_state.alerts = {}
-
-if "last_alert_state" not in st.session_state:
+if "initialized" not in st.session_state:
+    persisted = load_persistent_state()
+    st.session_state.watchlist = persisted.get("watchlist", [])
+    st.session_state.alerts = persisted.get("alerts", {})
     st.session_state.last_alert_state = {}
+    st.session_state.initialized = True
 
 # =====================================================
 # SIDEBAR
@@ -36,7 +54,7 @@ series_filter = st.sidebar.multiselect(
     default=["GS"]
 )
 
-if st.sidebar.button("🔄 Refresh"):
+if st.sidebar.button("🔄 Refresh prices"):
     st.cache_data.clear()
 
 # =====================================================
@@ -185,16 +203,14 @@ df["RelVal(bps)"] = (
 ) * 100
 
 # =====================================================
-# ALERT LOGIC (TOP LEVEL)
+# ALERT LOGIC
 # =====================================================
 def alert_status(r):
     a = st.session_state.alerts.get(r["Symbol"])
     if not a or a["target"] == 0:
         return "—"
 
-    side = a["side"]
-    target = a["target"]
-    tol = a["tolerance"]
+    side, target, tol = a["side"], a["target"], a["tolerance"]
 
     if side == "SELL":
         bid = r["Bid"]
@@ -238,20 +254,18 @@ st.subheader("Watchlist")
 
 all_symbols = sorted(df["Symbol"].unique())
 
-quick_add = st.selectbox("Add bond", [""] + all_symbols)
+quick_add = st.selectbox("Add bond (type to search)", [""] + all_symbols)
 if quick_add and quick_add not in st.session_state.watchlist:
     st.session_state.watchlist.append(quick_add)
+    save_persistent_state()
 
-paste = st.text_area(
-    "Paste from Excel (one per line)",
-    placeholder="754GS2036\n709GS2054"
-)
-
+paste = st.text_area("Paste from Excel (one per line)")
 if st.button("➕ Add pasted"):
     items = [x.strip().upper() for x in paste.splitlines() if x.strip()]
     st.session_state.watchlist = list(dict.fromkeys(
         st.session_state.watchlist + items
     ))
+    save_persistent_state()
 
 # =====================================================
 # ALERT SETUP
@@ -275,6 +289,7 @@ if alert_sym:
             "target": target,
             "tolerance": tol
         }
+        save_persistent_state()
 
 # =====================================================
 # WATCHLIST TABLE + SOUND
@@ -316,5 +331,6 @@ if st.session_state.watchlist:
         st.session_state.watchlist = [
             x for x in st.session_state.watchlist if x not in remove
         ]
+        save_persistent_state()
 else:
     st.info("Watchlist empty.")
