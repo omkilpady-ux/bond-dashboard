@@ -283,7 +283,7 @@ if alert_sym:
     with c3:
         tol = st.number_input("Tolerance", value=0.02, format="%.2f")
 
-    if st.button("💾 Save Alert"):
+ if st.button("💾 Save Alert"):
     st.session_state.alerts[alert_sym] = {
         "side": side,
         "target": target,
