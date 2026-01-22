@@ -216,4 +216,13 @@ st.subheader("Watchlist")
 # ---- Quick add ----
 all_symbols = sorted(df["Symbol"].unique())
 
-quick_add = st.s_
+all_symbols = sorted(df["Symbol"].unique())
+
+quick_add = st.selectbox(
+    "Quick add (type to search)",
+    options=[""] + all_symbols,
+    index=0
+)
+
+if quick_add and quick_add not in st.session_state.watchlist:
+    st.session_state.watchlist.append(quick_add)
