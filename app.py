@@ -7,7 +7,24 @@ from dateutil.relativedelta import relativedelta
 import base64
 import json
 from pathlib import Path
-import os
+
+# =====================================================
+# SYMBOL NORMALIZATION (GS + SG)
+# =====================================================
+def normalize_symbol(sym):
+    if not isinstance(sym, str):
+        return sym
+    s = sym.upper().replace(" ", "")
+    if "%" in s and ("GS" in s or "SG" in s):
+        coupon, rest = s.split("%", 1)
+        coupon = coupon.replace(".", "")
+        if "GS" in rest:
+            year = rest.replace("GS", "")
+            return f"{coupon}GS{year}"
+        if "SG" in rest:
+            year = rest.replace("SG", "")
+            return f"{coupon}SG{year}"
+    return s
 
 # =====================================================
 # PERSISTENCE
@@ -57,7 +74,7 @@ if st.sidebar.button("🔄 Refresh prices"):
     st.cache_data.clear()
 
 # =====================================================
-# SETTLEMENT DATE (T+1 INDIA)
+# SETTLEMENT DATE (INDIA T+1)
 # =====================================================
 def get_settlement_date():
     today = datetime.today().date()
@@ -85,6 +102,17 @@ def days360_us(start, end):
     return 360 * (y2 - y1) + 30 * (m2 - m1) + (d2 - d1)
 
 # =====================================================
+# SOUND HELPERS
+# =====================================================
+def play_near_sound():
+    beep = "UklGRigAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQQAAA=="
+    st.audio(base64.b64decode(beep), format="audio/wav")
+
+def play_hit_sound():
+    beep = "UklGRlIAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YVIAAAB//38AAP//"
+    st.audio(base64.b64decode(beep), format="audio/wav")
+
+# =====================================================
 # MASTER DATA
 # =====================================================
 @st.cache_data(ttl=24 * 3600)
@@ -94,6 +122,8 @@ def load_master():
 
     df = df[["SYMBOL", "IP RATE", "REDEMPTION DATE"]]
     df.rename(columns={"SYMBOL": "Symbol", "IP RATE": "Coupon"}, inplace=True)
+
+    df["Symbol"] = df["Symbol"].apply(normalize_symbol)
 
     df["REDEMPTION DATE"] = pd.to_datetime(
         df["REDEMPTION DATE"], dayfirst=True, errors="coerce"
@@ -107,26 +137,19 @@ def load_master():
     return df[df["Years"] > 0]
 
 # =====================================================
-# ISIN MAP (LOCAL, BULLETPROOF)
+# ISIN MAP (LOCAL FILE)
 # =====================================================
 @st.cache_data(ttl=24 * 3600)
 def load_isin_map():
-    filenames = [
-        "debt_isin_map.csv",
-        "DEBT.csv",
-        "debt_isin_map.csv.csv"
-    ]
+    df = pd.read_csv("debt_isin_map.csv")
+    df.columns = df.columns.str.strip().str.upper()
 
-    for f in filenames:
-        if os.path.exists(f):
-            df = pd.read_csv(f)
-            df.columns = df.columns.str.strip().str.upper()
-            if "SYMBOL" in df.columns and "ISIN" in df.columns:
-                df = df[["SYMBOL", "ISIN"]]
-                df.rename(columns={"SYMBOL": "Symbol"}, inplace=True)
-                return df.dropna().drop_duplicates()
+    df = df[["SYMBOL", "ISIN"]]
+    df.rename(columns={"SYMBOL": "Symbol"}, inplace=True)
 
-    return pd.DataFrame(columns=["Symbol", "ISIN"])
+    df["Symbol"] = df["Symbol"].apply(normalize_symbol)
+
+    return df.dropna().drop_duplicates()
 
 # =====================================================
 # LIVE NSE DATA
@@ -144,7 +167,7 @@ def load_live():
 
         for d in data:
             rows.append({
-                "Symbol": d.get("symbol"),
+                "Symbol": normalize_symbol(d.get("symbol")),
                 "Series": d.get("series"),
                 "Bid": d.get("buyPrice1") or 0,
                 "Ask": d.get("sellPrice1") or 0,
@@ -179,7 +202,9 @@ def last_coupon_date(red):
     return d
 
 df["Last Coupon"] = df["REDEMPTION DATE"].apply(last_coupon_date)
-df["Days Since"] = df.apply(lambda r: days360_us(r["Last Coupon"], SETTLEMENT), axis=1)
+df["Days Since"] = df.apply(
+    lambda r: days360_us(r["Last Coupon"], SETTLEMENT), axis=1
+)
 df["Accrued"] = df["Days Since"] * df["Coupon"] / 360
 df["Clean"] = df["Dirty"] - df["Accrued"]
 
@@ -190,7 +215,6 @@ df["YTM"] = df.apply(
     lambda r: npf.rate(r["Years"] * 2, r["Coupon"] / 2, -r["Clean"], 100) * 2 * 100,
     axis=1
 )
-
 df["YTM_Dirty"] = df.apply(
     lambda r: npf.rate(r["Years"] * 2, r["Coupon"] / 2, -r["Dirty"], 100) * 2 * 100,
     axis=1
@@ -208,12 +232,42 @@ isin_to_symbol = (
 )
 
 # =====================================================
+# ALERT LOGIC
+# =====================================================
+def alert_status(r):
+    a = st.session_state.alerts.get(r["Symbol"])
+    if not a or a["target"] == 0:
+        return "—"
+
+    side, target, tol = a["side"], a["target"], a["tolerance"]
+
+    if side == "SELL":
+        bid = r["Bid"]
+        if bid >= target:
+            return "HIT"
+        elif (target - bid) <= tol:
+            return "NEAR"
+        else:
+            return "FAR"
+
+    if side == "BUY":
+        ask = r["Ask"]
+        if ask <= target:
+            return "HIT"
+        elif (ask - target) <= tol:
+            return "NEAR"
+        else:
+            return "FAR"
+
+    return "—"
+
+# =====================================================
 # MARKET VIEW
 # =====================================================
 st.subheader("Market View")
 
 cols = [
-    "Symbol", "ISIN", "Series", "Bid", "Ask", "LTP",
+    "Symbol", "ISIN", "Series", "Bid", "Ask", "LTP", "Volume",
     "Dirty", "Accrued", "Clean", "YTM", "YTM_Dirty"
 ]
 
@@ -224,16 +278,72 @@ st.dataframe(df[cols], use_container_width=True)
 # =====================================================
 st.subheader("Watchlist")
 
-quick_add = st.selectbox("Add bond", [""] + sorted(df["Symbol"].unique()))
+all_symbols = sorted(df["Symbol"].unique())
+
+quick_add = st.selectbox("Add bond (type to search)", [""] + all_symbols)
 if quick_add and quick_add not in st.session_state.watchlist:
     st.session_state.watchlist.append(quick_add)
     save_persistent_state()
 
-paste_isin = st.text_area("Paste ISINs")
-if st.button("➕ Add ISINs"):
-    syms = [isin_to_symbol[i.strip().upper()] for i in paste_isin.splitlines()
-            if i.strip().upper() in isin_to_symbol]
+paste = st.text_area("Paste from Excel (Symbols)")
+if st.button("➕ Add pasted symbols"):
+    items = [x.strip().upper() for x in paste.splitlines() if x.strip()]
+    st.session_state.watchlist = list(dict.fromkeys(
+        st.session_state.watchlist + items
+    ))
+    save_persistent_state()
+
+paste_isin = st.text_area("Paste ISINs (one per line)")
+if st.button("➕ Add pasted ISINs"):
+    syms = [
+        isin_to_symbol[i.strip().upper()]
+        for i in paste_isin.splitlines()
+        if i.strip().upper() in isin_to_symbol
+    ]
     st.session_state.watchlist = list(dict.fromkeys(
         st.session_state.watchlist + syms
     ))
     save_persistent_state()
+
+# =====================================================
+# WATCHLIST TABLE + SOUND
+# =====================================================
+if st.session_state.watchlist:
+    wdf = df[df["Symbol"].isin(st.session_state.watchlist)].copy()
+    wdf["ALERT"] = wdf.apply(alert_status, axis=1)
+
+    for _, r in wdf.iterrows():
+        sym = r["Symbol"]
+        new = r["ALERT"]
+        old = st.session_state.last_alert_state.get(sym)
+
+        if new != old:
+            if new == "NEAR":
+                play_near_sound()
+            elif new == "HIT":
+                play_hit_sound()
+
+        st.session_state.last_alert_state[sym] = new
+
+    def style(v):
+        if v == "HIT":
+            return "background-color:#ff4d4d;color:white;"
+        if v == "NEAR":
+            return "background-color:#ffa500;"
+        if v == "FAR":
+            return "background-color:#e0e0e0;"
+        return ""
+
+    st.dataframe(
+        wdf[cols + ["ALERT"]].style.applymap(style, subset=["ALERT"]),
+        use_container_width=True
+    )
+
+    remove = st.multiselect("Remove bonds", st.session_state.watchlist)
+    if st.button("❌ Remove"):
+        st.session_state.watchlist = [
+            x for x in st.session_state.watchlist if x not in remove
+        ]
+        save_persistent_state()
+else:
+    st.info("Watchlist empty.")
