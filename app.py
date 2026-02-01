@@ -52,7 +52,7 @@ st.title("Composite Edge – Bond Market Monitor")
 st.caption(f"Last updated: {datetime.now().strftime('%H:%M:%S')}")
 
 # =====================================================
-# SESSION STATE INIT
+# SESSION INIT
 # =====================================================
 if "initialized" not in st.session_state:
     persisted = load_persistent_state()
@@ -65,16 +65,13 @@ if "initialized" not in st.session_state:
 # SIDEBAR
 # =====================================================
 st.sidebar.header("Controls")
-
-series_filter = st.sidebar.multiselect(
-    "Series", ["GS", "SG"], default=["GS"]
-)
+series_filter = st.sidebar.multiselect("Series", ["GS", "SG"], default=["GS"])
 
 if st.sidebar.button("🔄 Refresh prices"):
     st.cache_data.clear()
 
 # =====================================================
-# SETTLEMENT DATE (INDIA T+1)
+# SETTLEMENT DATE
 # =====================================================
 def get_settlement_date():
     today = datetime.today().date()
@@ -105,12 +102,10 @@ def days360_us(start, end):
 # SOUND HELPERS
 # =====================================================
 def play_near_sound():
-    beep = "UklGRigAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQQAAA=="
-    st.audio(base64.b64decode(beep), format="audio/wav")
+    st.audio(base64.b64decode("UklGRigAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQQAAA=="), format="audio/wav")
 
 def play_hit_sound():
-    beep = "UklGRlIAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YVIAAAB//38AAP//"
-    st.audio(base64.b64decode(beep), format="audio/wav")
+    st.audio(base64.b64decode("UklGRlIAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YVIAAAB//38AAP//"), format="audio/wav")
 
 # =====================================================
 # MASTER DATA
@@ -119,51 +114,42 @@ def play_hit_sound():
 def load_master():
     df = pd.read_csv("master_debt.csv")
     df.columns = df.columns.str.strip().str.upper()
-
     df = df[["SYMBOL", "IP RATE", "REDEMPTION DATE"]]
     df.rename(columns={"SYMBOL": "Symbol", "IP RATE": "Coupon"}, inplace=True)
     df["Symbol"] = df["Symbol"].apply(normalize_symbol)
 
-    df["REDEMPTION DATE"] = pd.to_datetime(
-        df["REDEMPTION DATE"], dayfirst=True, errors="coerce"
-    ).dt.date
-
+    df["REDEMPTION DATE"] = pd.to_datetime(df["REDEMPTION DATE"], dayfirst=True, errors="coerce").dt.date
     df = df.dropna(subset=["REDEMPTION DATE"])
-    df["Years"] = (
-        pd.to_datetime(df["REDEMPTION DATE"]) - pd.to_datetime(SETTLEMENT)
-    ).dt.days / 365
 
+    df["Years"] = (pd.to_datetime(df["REDEMPTION DATE"]) - pd.to_datetime(SETTLEMENT)).dt.days / 365
     return df[df["Years"] > 0]
 
 # =====================================================
-# ISIN MAP (AUTO-DETECT COLUMNS)
+# ISIN MAP (DEFENSIVE + DEBUG)
 # =====================================================
 @st.cache_data(ttl=24 * 3600)
 def load_isin_map():
     df = pd.read_csv("debt_isin_map.csv")
     df.columns = df.columns.str.strip().str.upper()
 
-    # detect symbol column
-    sym_col = next(
-        c for c in df.columns
-        if "SYMBOL" in c or "SECURITY" in c
-    )
+    st.warning("ISIN file columns detected:")
+    st.write(list(df.columns))
 
-    # detect ISIN column
-    isin_col = next(
-        c for c in df.columns
-        if "ISIN" in c
-    )
+    sym_cols = [c for c in df.columns if "SYMBOL" in c or "SECURITY" in c]
+    isin_cols = [c for c in df.columns if "ISIN" in c]
 
-    df = df[[sym_col, isin_col]]
-    df.rename(columns={sym_col: "Symbol", isin_col: "ISIN"}, inplace=True)
+    if not sym_cols or not isin_cols:
+        st.error("❌ Could not detect Symbol/ISIN columns automatically.")
+        st.stop()
 
+    df = df[[sym_cols[0], isin_cols[0]]]
+    df.rename(columns={sym_cols[0]: "Symbol", isin_cols[0]: "ISIN"}, inplace=True)
     df["Symbol"] = df["Symbol"].apply(normalize_symbol)
 
     return df.dropna().drop_duplicates()
 
 # =====================================================
-# LIVE NSE DATA
+# LIVE DATA
 # =====================================================
 @st.cache_data(ttl=5)
 def load_live():
@@ -173,9 +159,7 @@ def load_live():
         s.headers.update({"User-Agent": "Mozilla/5.0"})
         s.get("https://www.nseindia.com", timeout=10)
 
-        url = "https://www.nseindia.com/api/liveBonds-traded-on-cm?type=gsec"
-        data = s.get(url, timeout=10).json().get("data", [])
-
+        data = s.get("https://www.nseindia.com/api/liveBonds-traded-on-cm?type=gsec", timeout=10).json().get("data", [])
         for d in data:
             rows.append({
                 "Symbol": normalize_symbol(d.get("symbol")),
@@ -188,11 +172,10 @@ def load_live():
             })
     except:
         pass
-
     return pd.DataFrame(rows)
 
 # =====================================================
-# LOAD DATA
+# LOAD + MERGE
 # =====================================================
 master = load_master()
 live = load_live()
@@ -204,7 +187,7 @@ df = df[df["Series"].isin(series_filter)]
 df = df.dropna(subset=["Coupon", "Dirty", "Years"])
 
 # =====================================================
-# ACCRUED INTEREST
+# ACCRUED INTEREST + YTM
 # =====================================================
 def last_coupon_date(red):
     d = red
@@ -213,36 +196,15 @@ def last_coupon_date(red):
     return d
 
 df["Last Coupon"] = df["REDEMPTION DATE"].apply(last_coupon_date)
-df["Days Since"] = df.apply(
-    lambda r: days360_us(r["Last Coupon"], SETTLEMENT), axis=1
-)
+df["Days Since"] = df.apply(lambda r: days360_us(r["Last Coupon"], SETTLEMENT), axis=1)
 df["Accrued"] = df["Days Since"] * df["Coupon"] / 360
 df["Clean"] = df["Dirty"] - df["Accrued"]
 
-# =====================================================
-# YTM
-# =====================================================
-df["YTM"] = df.apply(
-    lambda r: npf.rate(r["Years"] * 2, r["Coupon"] / 2, -r["Clean"], 100) * 2 * 100,
-    axis=1
-)
-df["YTM_Dirty"] = df.apply(
-    lambda r: npf.rate(r["Years"] * 2, r["Coupon"] / 2, -r["Dirty"], 100) * 2 * 100,
-    axis=1
-)
+df["YTM"] = df.apply(lambda r: npf.rate(r["Years"]*2, r["Coupon"]/2, -r["Clean"], 100)*2*100, axis=1)
+df["YTM_Dirty"] = df.apply(lambda r: npf.rate(r["Years"]*2, r["Coupon"]/2, -r["Dirty"], 100)*2*100, axis=1)
 
 # =====================================================
-# ISIN LOOKUP
+# DISPLAY
 # =====================================================
-isin_to_symbol = (
-    df[["ISIN", "Symbol"]]
-    .dropna()
-    .drop_duplicates()
-    .set_index("ISIN")["Symbol"]
-    .to_dict()
-)
-
-# =====================================================
-# ALERT LOGIC, WATCHLIST, UI
-# (unchanged from your original – omitted here for brevity)
-# =====================================================
+st.subheader("Market View")
+st.dataframe(df[["Symbol", "ISIN", "Series", "Dirty", "Clean", "YTM", "YTM_Dirty"]], use_container_width=True)
