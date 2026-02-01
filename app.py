@@ -124,16 +124,28 @@ def load_master():
 @st.cache_data(ttl=24 * 3600)
 def load_isin_map():
     try:
+        headers = {
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "text/csv"
+        }
+
         url = "https://nsearchives.nseindia.com/content/equities/DEBT.csv"
-        df = pd.read_csv(url)
+        r = requests.get(url, headers=headers, timeout=10)
+        r.raise_for_status()
+
+        from io import StringIO
+        df = pd.read_csv(StringIO(r.text))
         df.columns = df.columns.str.strip().str.upper()
 
         df = df[["SYMBOL", "ISIN"]]
         df.rename(columns={"SYMBOL": "Symbol"}, inplace=True)
 
         return df.dropna().drop_duplicates()
-    except:
+
+    except Exception as e:
+        st.warning("ISIN reference file (DEBT.csv) could not be loaded.")
         return pd.DataFrame(columns=["Symbol", "ISIN"])
+
 
 # =====================================================
 # LIVE NSE DATA
