@@ -7,6 +7,7 @@ from dateutil.relativedelta import relativedelta
 import base64
 import json
 from pathlib import Path
+import os
 
 # =====================================================
 # PERSISTENCE
@@ -34,7 +35,7 @@ st.title("Composite Edge – Bond Market Monitor")
 st.caption(f"Last updated: {datetime.now().strftime('%H:%M:%S')}")
 
 # =====================================================
-# SESSION STATE INIT (PERSISTENT)
+# SESSION STATE INIT
 # =====================================================
 if "initialized" not in st.session_state:
     persisted = load_persistent_state()
@@ -49,16 +50,14 @@ if "initialized" not in st.session_state:
 st.sidebar.header("Controls")
 
 series_filter = st.sidebar.multiselect(
-    "Series",
-    ["GS", "SG"],
-    default=["GS"]
+    "Series", ["GS", "SG"], default=["GS"]
 )
 
 if st.sidebar.button("🔄 Refresh prices"):
     st.cache_data.clear()
 
 # =====================================================
-# SETTLEMENT DATE (INDIA T+1)
+# SETTLEMENT DATE (T+1 INDIA)
 # =====================================================
 def get_settlement_date():
     today = datetime.today().date()
@@ -73,7 +72,7 @@ def get_settlement_date():
 SETTLEMENT = get_settlement_date()
 
 # =====================================================
-# 30/360 US (EXCEL MATCH)
+# 30/360 US
 # =====================================================
 def days360_us(start, end):
     d1, d2 = start.day, end.day
@@ -86,18 +85,7 @@ def days360_us(start, end):
     return 360 * (y2 - y1) + 30 * (m2 - m1) + (d2 - d1)
 
 # =====================================================
-# SOUND HELPERS
-# =====================================================
-def play_near_sound():
-    beep = "UklGRigAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQQAAA=="
-    st.audio(base64.b64decode(beep), format="audio/wav")
-
-def play_hit_sound():
-    beep = "UklGRlIAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YVIAAAB//38AAP//"
-    st.audio(base64.b64decode(beep), format="audio/wav")
-
-# =====================================================
-# MASTER DATA (YOUR FILE – NO ISIN HERE)
+# MASTER DATA
 # =====================================================
 @st.cache_data(ttl=24 * 3600)
 def load_master():
@@ -119,23 +107,26 @@ def load_master():
     return df[df["Years"] > 0]
 
 # =====================================================
-# ISIN MAP FROM NSE (REAL SOURCE)
+# ISIN MAP (LOCAL, BULLETPROOF)
 # =====================================================
 @st.cache_data(ttl=24 * 3600)
 def load_isin_map():
-    try:
-        df = pd.read_csv("debt_isin_map.csv")
-        df.columns = df.columns.str.strip().str.upper()
+    filenames = [
+        "debt_isin_map.csv",
+        "DEBT.csv",
+        "debt_isin_map.csv.csv"
+    ]
 
-        df = df[["SYMBOL", "ISIN"]]
-        df.rename(columns={"SYMBOL": "Symbol"}, inplace=True)
+    for f in filenames:
+        if os.path.exists(f):
+            df = pd.read_csv(f)
+            df.columns = df.columns.str.strip().str.upper()
+            if "SYMBOL" in df.columns and "ISIN" in df.columns:
+                df = df[["SYMBOL", "ISIN"]]
+                df.rename(columns={"SYMBOL": "Symbol"}, inplace=True)
+                return df.dropna().drop_duplicates()
 
-        return df.dropna().drop_duplicates()
-
-    except Exception:
-        st.error("Local ISIN file (debt_isin_map.csv) not found or invalid.")
-        return pd.DataFrame(columns=["Symbol", "ISIN"])
-
+    return pd.DataFrame(columns=["Symbol", "ISIN"])
 
 # =====================================================
 # LIVE NSE DATA
@@ -152,19 +143,13 @@ def load_live():
         data = s.get(url, timeout=10).json().get("data", [])
 
         for d in data:
-            if not isinstance(d, dict):
-                continue
-
-            last_px = d.get("lastPrice") or 0
-            avg_px = d.get("averagePrice") or 0
-
             rows.append({
                 "Symbol": d.get("symbol"),
                 "Series": d.get("series"),
                 "Bid": d.get("buyPrice1") or 0,
                 "Ask": d.get("sellPrice1") or 0,
-                "LTP": last_px,
-                "Dirty": last_px if last_px != 0 else avg_px,
+                "LTP": d.get("lastPrice") or 0,
+                "Dirty": d.get("lastPrice") or d.get("averagePrice") or 0,
                 "Volume": d.get("totalTradedVolume") or 0,
             })
     except:
@@ -178,10 +163,6 @@ def load_live():
 master = load_master()
 live = load_live()
 isin_map = load_isin_map()
-
-if master.empty or live.empty:
-    st.warning("Live data unavailable. Try refresh.")
-    st.stop()
 
 df = live.merge(master, on="Symbol", how="left")
 df = df.merge(isin_map, on="Symbol", how="left")
@@ -198,47 +179,25 @@ def last_coupon_date(red):
     return d
 
 df["Last Coupon"] = df["REDEMPTION DATE"].apply(last_coupon_date)
-df["Days Since"] = df.apply(
-    lambda r: days360_us(r["Last Coupon"], SETTLEMENT),
-    axis=1
-)
+df["Days Since"] = df.apply(lambda r: days360_us(r["Last Coupon"], SETTLEMENT), axis=1)
 df["Accrued"] = df["Days Since"] * df["Coupon"] / 360
 df["Clean"] = df["Dirty"] - df["Accrued"]
 
 # =====================================================
-# YTM (CLEAN – ORIGINAL)
+# YTM
 # =====================================================
-def calc_ytm(r):
-    try:
-        return npf.rate(
-            r["Years"] * 2,
-            r["Coupon"] / 2,
-            -r["Clean"],
-            100
-        ) * 2 * 100
-    except:
-        return None
+df["YTM"] = df.apply(
+    lambda r: npf.rate(r["Years"] * 2, r["Coupon"] / 2, -r["Clean"], 100) * 2 * 100,
+    axis=1
+)
 
-df["YTM"] = df.apply(calc_ytm, axis=1)
+df["YTM_Dirty"] = df.apply(
+    lambda r: npf.rate(r["Years"] * 2, r["Coupon"] / 2, -r["Dirty"], 100) * 2 * 100,
+    axis=1
+)
 
 # =====================================================
-# YTM (DIRTY – NEW)
-# =====================================================
-def calc_ytm_dirty(r):
-    try:
-        return npf.rate(
-            r["Years"] * 2,
-            r["Coupon"] / 2,
-            -r["Dirty"],
-            100
-        ) * 2 * 100
-    except:
-        return None
-
-df["YTM_Dirty"] = df.apply(calc_ytm_dirty, axis=1)
-
-# =====================================================
-# ISIN → SYMBOL LOOKUP
+# ISIN LOOKUP
 # =====================================================
 isin_to_symbol = (
     df[["ISIN", "Symbol"]]
@@ -249,42 +208,12 @@ isin_to_symbol = (
 )
 
 # =====================================================
-# ALERT LOGIC
-# =====================================================
-def alert_status(r):
-    a = st.session_state.alerts.get(r["Symbol"])
-    if not a or a["target"] == 0:
-        return "—"
-
-    side, target, tol = a["side"], a["target"], a["tolerance"]
-
-    if side == "SELL":
-        bid = r["Bid"]
-        if bid >= target:
-            return "HIT"
-        elif (target - bid) <= tol:
-            return "NEAR"
-        else:
-            return "FAR"
-
-    if side == "BUY":
-        ask = r["Ask"]
-        if ask <= target:
-            return "HIT"
-        elif (ask - target) <= tol:
-            return "NEAR"
-        else:
-            return "FAR"
-
-    return "—"
-
-# =====================================================
 # MARKET VIEW
 # =====================================================
 st.subheader("Market View")
 
 cols = [
-    "Symbol", "ISIN", "Series", "Bid", "Ask", "LTP", "Volume",
+    "Symbol", "ISIN", "Series", "Bid", "Ask", "LTP",
     "Dirty", "Accrued", "Clean", "YTM", "YTM_Dirty"
 ]
 
@@ -295,44 +224,16 @@ st.dataframe(df[cols], use_container_width=True)
 # =====================================================
 st.subheader("Watchlist")
 
-all_symbols = sorted(df["Symbol"].unique())
-
-quick_add = st.selectbox("Add bond (type to search)", [""] + all_symbols)
+quick_add = st.selectbox("Add bond", [""] + sorted(df["Symbol"].unique()))
 if quick_add and quick_add not in st.session_state.watchlist:
     st.session_state.watchlist.append(quick_add)
     save_persistent_state()
 
-paste = st.text_area("Paste from Excel (G-Sec codes)")
-if st.button("➕ Add pasted"):
-    items = [x.strip().upper() for x in paste.splitlines() if x.strip()]
-    st.session_state.watchlist = list(dict.fromkeys(
-        st.session_state.watchlist + items
-    ))
-    save_persistent_state()
-
-# =====================================================
-# ADD VIA ISIN
-# =====================================================
-st.markdown("#### 🔎 Add via ISIN")
-
-paste_isin = st.text_area("Paste ISINs from Excel", key="isin_paste")
-
+paste_isin = st.text_area("Paste ISINs")
 if st.button("➕ Add ISINs"):
-    isins = [x.strip().upper() for x in paste_isin.splitlines() if x.strip()]
-    resolved = [isin_to_symbol[i] for i in isins if i in isin_to_symbol]
-
+    syms = [isin_to_symbol[i.strip().upper()] for i in paste_isin.splitlines()
+            if i.strip().upper() in isin_to_symbol]
     st.session_state.watchlist = list(dict.fromkeys(
-        st.session_state.watchlist + resolved
+        st.session_state.watchlist + syms
     ))
     save_persistent_state()
-
-# =====================================================
-# WATCHLIST TABLE
-# =====================================================
-if st.session_state.watchlist:
-    wdf = df[df["Symbol"].isin(st.session_state.watchlist)].copy()
-    wdf["ALERT"] = wdf.apply(alert_status, axis=1)
-
-    st.dataframe(wdf[cols + ["ALERT"]], use_container_width=True)
-else:
-    st.info("Watchlist empty.")
