@@ -103,7 +103,8 @@ def play_hit_sound():
 def load_master():
     df = pd.read_csv("master_debt.csv")
     df.columns = df.columns.str.strip().str.upper()
-    df = df[["SYMBOL", "IP RATE", "REDEMPTION DATE"]]
+
+    df = df[["SYMBOL", "IP RATE", "REDEMPTION DATE", "ISIN"]]
     df.rename(columns={"SYMBOL": "Symbol", "IP RATE": "Coupon"}, inplace=True)
 
     df["REDEMPTION DATE"] = pd.to_datetime(
@@ -216,6 +217,17 @@ def calc_ytm_dirty(r):
 df["YTM_Dirty"] = df.apply(calc_ytm_dirty, axis=1)
 
 # =====================================================
+# ISIN LOOKUP MAP (NEW)
+# =====================================================
+isin_to_symbol = (
+    df[["ISIN", "Symbol"]]
+    .dropna()
+    .drop_duplicates()
+    .set_index("ISIN")["Symbol"]
+    .to_dict()
+)
+
+# =====================================================
 # ALERT LOGIC
 # =====================================================
 def alert_status(r):
@@ -251,7 +263,7 @@ def alert_status(r):
 st.subheader("Market View")
 
 cols = [
-    "Symbol", "Series", "Bid", "Ask", "LTP", "Volume",
+    "Symbol", "ISIN", "Series", "Bid", "Ask", "LTP", "Volume",
     "Dirty", "Accrued", "Clean", "YTM", "YTM_Dirty"
 ]
 
@@ -279,6 +291,34 @@ if st.button("➕ Add pasted"):
         st.session_state.watchlist + items
     ))
     save_persistent_state()
+
+# =====================================================
+# ADD VIA ISIN (NEW)
+# =====================================================
+st.markdown("#### 🔎 Add via ISIN")
+
+paste_isin = st.text_area("Paste ISINs from Excel (one per line)", key="isin_paste")
+
+if st.button("➕ Add ISINs"):
+    isins = [x.strip().upper() for x in paste_isin.splitlines() if x.strip()]
+
+    resolved = []
+    unresolved = []
+
+    for i in isins:
+        sym = isin_to_symbol.get(i)
+        if sym:
+            resolved.append(sym)
+        else:
+            unresolved.append(i)
+
+    st.session_state.watchlist = list(dict.fromkeys(
+        st.session_state.watchlist + resolved
+    ))
+    save_persistent_state()
+
+    if unresolved:
+        st.warning(f"Unresolved ISINs: {', '.join(unresolved)}")
 
 # =====================================================
 # ALERT SETUP
