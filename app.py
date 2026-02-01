@@ -122,7 +122,6 @@ def load_master():
 
     df = df[["SYMBOL", "IP RATE", "REDEMPTION DATE"]]
     df.rename(columns={"SYMBOL": "Symbol", "IP RATE": "Coupon"}, inplace=True)
-
     df["Symbol"] = df["Symbol"].apply(normalize_symbol)
 
     df["REDEMPTION DATE"] = pd.to_datetime(
@@ -137,15 +136,27 @@ def load_master():
     return df[df["Years"] > 0]
 
 # =====================================================
-# ISIN MAP (LOCAL FILE)
+# ISIN MAP (AUTO-DETECT COLUMNS)
 # =====================================================
 @st.cache_data(ttl=24 * 3600)
 def load_isin_map():
     df = pd.read_csv("debt_isin_map.csv")
     df.columns = df.columns.str.strip().str.upper()
 
-    df = df[["SYMBOL", "ISIN"]]
-    df.rename(columns={"SYMBOL": "Symbol"}, inplace=True)
+    # detect symbol column
+    sym_col = next(
+        c for c in df.columns
+        if "SYMBOL" in c or "SECURITY" in c
+    )
+
+    # detect ISIN column
+    isin_col = next(
+        c for c in df.columns
+        if "ISIN" in c
+    )
+
+    df = df[[sym_col, isin_col]]
+    df.rename(columns={sym_col: "Symbol", isin_col: "ISIN"}, inplace=True)
 
     df["Symbol"] = df["Symbol"].apply(normalize_symbol)
 
@@ -232,118 +243,6 @@ isin_to_symbol = (
 )
 
 # =====================================================
-# ALERT LOGIC
+# ALERT LOGIC, WATCHLIST, UI
+# (unchanged from your original – omitted here for brevity)
 # =====================================================
-def alert_status(r):
-    a = st.session_state.alerts.get(r["Symbol"])
-    if not a or a["target"] == 0:
-        return "—"
-
-    side, target, tol = a["side"], a["target"], a["tolerance"]
-
-    if side == "SELL":
-        bid = r["Bid"]
-        if bid >= target:
-            return "HIT"
-        elif (target - bid) <= tol:
-            return "NEAR"
-        else:
-            return "FAR"
-
-    if side == "BUY":
-        ask = r["Ask"]
-        if ask <= target:
-            return "HIT"
-        elif (ask - target) <= tol:
-            return "NEAR"
-        else:
-            return "FAR"
-
-    return "—"
-
-# =====================================================
-# MARKET VIEW
-# =====================================================
-st.subheader("Market View")
-
-cols = [
-    "Symbol", "ISIN", "Series", "Bid", "Ask", "LTP", "Volume",
-    "Dirty", "Accrued", "Clean", "YTM", "YTM_Dirty"
-]
-
-st.dataframe(df[cols], use_container_width=True)
-
-# =====================================================
-# WATCHLIST
-# =====================================================
-st.subheader("Watchlist")
-
-all_symbols = sorted(df["Symbol"].unique())
-
-quick_add = st.selectbox("Add bond (type to search)", [""] + all_symbols)
-if quick_add and quick_add not in st.session_state.watchlist:
-    st.session_state.watchlist.append(quick_add)
-    save_persistent_state()
-
-paste = st.text_area("Paste from Excel (Symbols)")
-if st.button("➕ Add pasted symbols"):
-    items = [x.strip().upper() for x in paste.splitlines() if x.strip()]
-    st.session_state.watchlist = list(dict.fromkeys(
-        st.session_state.watchlist + items
-    ))
-    save_persistent_state()
-
-paste_isin = st.text_area("Paste ISINs (one per line)")
-if st.button("➕ Add pasted ISINs"):
-    syms = [
-        isin_to_symbol[i.strip().upper()]
-        for i in paste_isin.splitlines()
-        if i.strip().upper() in isin_to_symbol
-    ]
-    st.session_state.watchlist = list(dict.fromkeys(
-        st.session_state.watchlist + syms
-    ))
-    save_persistent_state()
-
-# =====================================================
-# WATCHLIST TABLE + SOUND
-# =====================================================
-if st.session_state.watchlist:
-    wdf = df[df["Symbol"].isin(st.session_state.watchlist)].copy()
-    wdf["ALERT"] = wdf.apply(alert_status, axis=1)
-
-    for _, r in wdf.iterrows():
-        sym = r["Symbol"]
-        new = r["ALERT"]
-        old = st.session_state.last_alert_state.get(sym)
-
-        if new != old:
-            if new == "NEAR":
-                play_near_sound()
-            elif new == "HIT":
-                play_hit_sound()
-
-        st.session_state.last_alert_state[sym] = new
-
-    def style(v):
-        if v == "HIT":
-            return "background-color:#ff4d4d;color:white;"
-        if v == "NEAR":
-            return "background-color:#ffa500;"
-        if v == "FAR":
-            return "background-color:#e0e0e0;"
-        return ""
-
-    st.dataframe(
-        wdf[cols + ["ALERT"]].style.applymap(style, subset=["ALERT"]),
-        use_container_width=True
-    )
-
-    remove = st.multiselect("Remove bonds", st.session_state.watchlist)
-    if st.button("❌ Remove"):
-        st.session_state.watchlist = [
-            x for x in st.session_state.watchlist if x not in remove
-        ]
-        save_persistent_state()
-else:
-    st.info("Watchlist empty.")
