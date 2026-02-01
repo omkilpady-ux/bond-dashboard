@@ -97,14 +97,14 @@ def play_hit_sound():
     st.audio(base64.b64decode(beep), format="audio/wav")
 
 # =====================================================
-# MASTER DATA
+# MASTER DATA (YOUR FILE – NO ISIN HERE)
 # =====================================================
 @st.cache_data(ttl=24 * 3600)
 def load_master():
     df = pd.read_csv("master_debt.csv")
     df.columns = df.columns.str.strip().str.upper()
 
-    df = df[["SYMBOL", "IP RATE", "REDEMPTION DATE", "ISIN"]]
+    df = df[["SYMBOL", "IP RATE", "REDEMPTION DATE"]]
     df.rename(columns={"SYMBOL": "Symbol", "IP RATE": "Coupon"}, inplace=True)
 
     df["REDEMPTION DATE"] = pd.to_datetime(
@@ -117,6 +117,23 @@ def load_master():
     ).dt.days / 365
 
     return df[df["Years"] > 0]
+
+# =====================================================
+# ISIN MAP FROM NSE (REAL SOURCE)
+# =====================================================
+@st.cache_data(ttl=24 * 3600)
+def load_isin_map():
+    try:
+        url = "https://nsearchives.nseindia.com/content/equities/DEBT.csv"
+        df = pd.read_csv(url)
+        df.columns = df.columns.str.strip().str.upper()
+
+        df = df[["SYMBOL", "ISIN"]]
+        df.rename(columns={"SYMBOL": "Symbol"}, inplace=True)
+
+        return df.dropna().drop_duplicates()
+    except:
+        return pd.DataFrame(columns=["Symbol", "ISIN"])
 
 # =====================================================
 # LIVE NSE DATA
@@ -158,12 +175,14 @@ def load_live():
 # =====================================================
 master = load_master()
 live = load_live()
+isin_map = load_isin_map()
 
 if master.empty or live.empty:
     st.warning("Live data unavailable. Try refresh.")
     st.stop()
 
 df = live.merge(master, on="Symbol", how="left")
+df = df.merge(isin_map, on="Symbol", how="left")
 df = df[df["Series"].isin(series_filter)]
 df = df.dropna(subset=["Coupon", "Dirty", "Years"])
 
@@ -217,7 +236,7 @@ def calc_ytm_dirty(r):
 df["YTM_Dirty"] = df.apply(calc_ytm_dirty, axis=1)
 
 # =====================================================
-# ISIN LOOKUP MAP (NEW)
+# ISIN → SYMBOL LOOKUP
 # =====================================================
 isin_to_symbol = (
     df[["ISIN", "Symbol"]]
@@ -267,10 +286,7 @@ cols = [
     "Dirty", "Accrued", "Clean", "YTM", "YTM_Dirty"
 ]
 
-st.dataframe(
-    df[cols],
-    use_container_width=True
-)
+st.dataframe(df[cols], use_container_width=True)
 
 # =====================================================
 # WATCHLIST
@@ -284,7 +300,7 @@ if quick_add and quick_add not in st.session_state.watchlist:
     st.session_state.watchlist.append(quick_add)
     save_persistent_state()
 
-paste = st.text_area("Paste from Excel (one per line)")
+paste = st.text_area("Paste from Excel (G-Sec codes)")
 if st.button("➕ Add pasted"):
     items = [x.strip().upper() for x in paste.splitlines() if x.strip()]
     st.session_state.watchlist = list(dict.fromkeys(
@@ -293,97 +309,28 @@ if st.button("➕ Add pasted"):
     save_persistent_state()
 
 # =====================================================
-# ADD VIA ISIN (NEW)
+# ADD VIA ISIN
 # =====================================================
 st.markdown("#### 🔎 Add via ISIN")
 
-paste_isin = st.text_area("Paste ISINs from Excel (one per line)", key="isin_paste")
+paste_isin = st.text_area("Paste ISINs from Excel", key="isin_paste")
 
 if st.button("➕ Add ISINs"):
     isins = [x.strip().upper() for x in paste_isin.splitlines() if x.strip()]
-
-    resolved = []
-    unresolved = []
-
-    for i in isins:
-        sym = isin_to_symbol.get(i)
-        if sym:
-            resolved.append(sym)
-        else:
-            unresolved.append(i)
+    resolved = [isin_to_symbol[i] for i in isins if i in isin_to_symbol]
 
     st.session_state.watchlist = list(dict.fromkeys(
         st.session_state.watchlist + resolved
     ))
     save_persistent_state()
 
-    if unresolved:
-        st.warning(f"Unresolved ISINs: {', '.join(unresolved)}")
-
 # =====================================================
-# ALERT SETUP
-# =====================================================
-st.markdown("### 🎯 Alert Setup")
-
-alert_sym = st.selectbox("Bond", [""] + st.session_state.watchlist)
-
-if alert_sym:
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        side = st.selectbox("Side", ["BUY", "SELL"])
-    with c2:
-        target = st.number_input("Target", format="%.2f")
-    with c3:
-        tol = st.number_input("Tolerance", value=0.02, format="%.2f")
-
-    if st.button("💾 Save Alert"):
-        st.session_state.alerts[alert_sym] = {
-            "side": side,
-            "target": target,
-            "tolerance": tol
-        }
-        save_persistent_state()
-
-# =====================================================
-# WATCHLIST TABLE + SOUND
+# WATCHLIST TABLE
 # =====================================================
 if st.session_state.watchlist:
     wdf = df[df["Symbol"].isin(st.session_state.watchlist)].copy()
     wdf["ALERT"] = wdf.apply(alert_status, axis=1)
 
-    for _, r in wdf.iterrows():
-        sym = r["Symbol"]
-        new = r["ALERT"]
-        old = st.session_state.last_alert_state.get(sym)
-
-        if new != old:
-            if new == "NEAR":
-                play_near_sound()
-            elif new == "HIT":
-                play_hit_sound()
-
-        st.session_state.last_alert_state[sym] = new
-
-    def style(v):
-        if v == "HIT":
-            return "background-color:#ff4d4d;color:white;"
-        if v == "NEAR":
-            return "background-color:#ffa500;"
-        if v == "FAR":
-            return "background-color:#e0e0e0;"
-        return ""
-
-    st.dataframe(
-        wdf[cols + ["ALERT"]]
-        .style.applymap(style, subset=["ALERT"]),
-        use_container_width=True
-    )
-
-    remove = st.multiselect("Remove bonds", st.session_state.watchlist)
-    if st.button("❌ Remove"):
-        st.session_state.watchlist = [
-            x for x in st.session_state.watchlist if x not in remove
-        ]
-        save_persistent_state()
+    st.dataframe(wdf[cols + ["ALERT"]], use_container_width=True)
 else:
     st.info("Watchlist empty.")
