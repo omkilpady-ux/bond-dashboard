@@ -50,16 +50,15 @@ if "initialized" not in st.session_state:
 # SIDEBAR
 # =====================================================
 st.sidebar.header("Controls")
+
 series_filter = st.sidebar.multiselect(
-    "Series", ["GS", "SG"], default=["GS"]
+    "Series",
+    ["GS", "SG"],
+    default=["GS"]
 )
 
 if st.sidebar.button("🔄 Refresh prices"):
     st.cache_data.clear()
-
-custom_price = st.sidebar.number_input(
-    "Custom Dirty Price (Yield Check)", value=0.0, format="%.2f"
-)
 
 # =====================================================
 # SETTLEMENT DATE (INDIA T+1)
@@ -67,6 +66,7 @@ custom_price = st.sidebar.number_input(
 def get_settlement_date():
     today = datetime.today().date()
     wd = today.weekday()
+
     if wd <= 3:
         return today + timedelta(days=1)
     elif wd == 4:
@@ -77,7 +77,7 @@ def get_settlement_date():
 SETTLEMENT = get_settlement_date()
 
 # =====================================================
-# 30/360 US
+# 30/360 US (EXCEL MATCH)
 # =====================================================
 def days360_us(start, end):
     d1, d2 = start.day, end.day
@@ -111,17 +111,26 @@ def load_master():
     df.columns = df.columns.str.strip().str.upper()
 
     df = df[["SYMBOL", "IP RATE", "REDEMPTION DATE"]]
-    df.rename(columns={"SYMBOL": "Symbol", "IP RATE": "Coupon"}, inplace=True)
+
+    df.rename(
+        columns={
+            "SYMBOL": "Symbol",
+            "IP RATE": "Coupon"
+        },
+        inplace=True,
+    )
 
     df["REDEMPTION DATE"] = pd.to_datetime(
-        df["REDEMPTION DATE"], dayfirst=True, errors="coerce"
+        df["REDEMPTION DATE"],
+        dayfirst=True,
+        errors="coerce"
     ).dt.date
 
     df = df.dropna(subset=["REDEMPTION DATE"])
 
     df["Years"] = (
-        pd.to_datetime(df["REDEMPTION DATE"])
-        - pd.to_datetime(SETTLEMENT)
+        pd.to_datetime(df["REDEMPTION DATE"]) -
+        pd.to_datetime(SETTLEMENT)
     ).dt.days / 365
 
     return df[df["Years"] > 0]
@@ -132,6 +141,7 @@ def load_master():
 @st.cache_data(ttl=5)
 def load_live():
     rows = []
+
     try:
         s = requests.Session()
         s.headers.update({"User-Agent": "Mozilla/5.0"})
@@ -178,7 +188,7 @@ df = df[df["Series"].isin(series_filter)]
 df = df.dropna(subset=["Coupon", "Dirty", "Years"])
 
 # =====================================================
-# ACCRUED INTEREST
+# LAST INTEREST PAID + ACCRUED
 # =====================================================
 def last_coupon_date(redemption):
     d = redemption
@@ -187,41 +197,50 @@ def last_coupon_date(redemption):
     return d
 
 df["Last Interest Paid"] = df["REDEMPTION DATE"].apply(last_coupon_date)
+
 df["Days Since"] = df.apply(
-    lambda r: days360_us(r["Last Interest Paid"], SETTLEMENT), axis=1
+    lambda r: days360_us(r["Last Interest Paid"], SETTLEMENT),
+    axis=1,
 )
+
 df["Accrued"] = df["Days Since"] * df["Coupon"] / 360
 df["Clean"] = df["Dirty"] - df["Accrued"]
 
 # =====================================================
-# YTM CALCS
+# YTM (CLEAN)
 # =====================================================
-def ytm(price, r):
-    return (
-        npf.rate(
-            r["Years"] * 2,
-            r["Coupon"] / 2,
-            -price,
-            100,
+def calc_ytm(r):
+    try:
+        return (
+            npf.rate(
+                r["Years"] * 2,
+                r["Coupon"] / 2,
+                -r["Clean"],
+                100,
+            ) * 2 * 100
         )
-        * 2
-        * 100
-    )
+    except:
+        return None
 
-df["YTM"] = df.apply(lambda r: ytm(r["Clean"], r), axis=1)
-df["YTM_Dirty"] = df.apply(lambda r: ytm(r["Dirty"], r), axis=1)
-df["YTM_Bid_Dirty"] = df.apply(
-    lambda r: ytm(r["Bid"] + r["Accrued"], r) if r["Bid"] > 0 else None,
-    axis=1,
-)
-df["YTM_Ask_Dirty"] = df.apply(
-    lambda r: ytm(r["Ask"] + r["Accrued"], r) if r["Ask"] > 0 else None,
-    axis=1,
-)
-df["YTM_Custom_Dirty"] = df.apply(
-    lambda r: ytm(custom_price, r) if custom_price > 0 else None,
-    axis=1,
-)
+df["YTM"] = df.apply(calc_ytm, axis=1)
+
+# =====================================================
+# YTM (DIRTY)
+# =====================================================
+def calc_ytm_dirty(r):
+    try:
+        return (
+            npf.rate(
+                r["Years"] * 2,
+                r["Coupon"] / 2,
+                -r["Dirty"],
+                100,
+            ) * 2 * 100
+        )
+    except:
+        return None
+
+df["YTM_Dirty"] = df.apply(calc_ytm_dirty, axis=1)
 
 # =====================================================
 # ALERT LOGIC
@@ -254,26 +273,14 @@ def alert_status(r):
     return "—"
 
 # =====================================================
-# MARKET VIEW (UNCHANGED)
+# MARKET VIEW
 # =====================================================
 st.subheader("Market View")
 
 cols = [
-    "Symbol",
-    "Series",
-    "Bid",
-    "Ask",
-    "LTP",
-    "Volume",
-    "Dirty",
-    "Accrued",
-    "Clean",
-    "Last Interest Paid",
-    "YTM",
-    "YTM_Dirty",
-    "YTM_Bid_Dirty",
-    "YTM_Ask_Dirty",
-    "YTM_Custom_Dirty",
+    "Symbol", "Series", "Bid", "Ask", "LTP", "Volume",
+    "Dirty", "Accrued", "Clean",
+    "Last Interest Paid", "YTM", "YTM_Dirty",
 ]
 
 st.dataframe(df[cols], use_container_width=True)
@@ -284,8 +291,10 @@ st.dataframe(df[cols], use_container_width=True)
 st.subheader("Watchlist")
 
 all_symbols = sorted(df["Symbol"].unique())
+
 quick_add = st.selectbox(
-    "Add bond (type to search)", [""] + all_symbols
+    "Add bond (type to search)",
+    [""] + all_symbols
 )
 
 if quick_add and quick_add not in st.session_state.watchlist:
@@ -307,7 +316,8 @@ if st.button("➕ Add pasted"):
 st.markdown("### 🎯 Alert Setup")
 
 alert_sym = st.selectbox(
-    "Bond", [""] + st.session_state.watchlist
+    "Bond",
+    [""] + st.session_state.watchlist
 )
 
 if alert_sym:
@@ -335,9 +345,6 @@ if st.session_state.watchlist:
     wdf = df[df["Symbol"].isin(st.session_state.watchlist)].copy()
     wdf["ALERT"] = wdf.apply(alert_status, axis=1)
 
-    # 🔒 ONLY CHANGE: ROUND WATCHLIST DISPLAY TO 2 DECIMALS
-    wdf = wdf.round(2)
-
     for _, r in wdf.iterrows():
         sym = r["Symbol"]
         new = r["ALERT"]
@@ -349,7 +356,7 @@ if st.session_state.watchlist:
             elif new == "HIT":
                 play_hit_sound()
 
-            st.session_state.last_alert_state[sym] = new
+        st.session_state.last_alert_state[sym] = new
 
     def style(v):
         if v == "HIT":
@@ -361,15 +368,11 @@ if st.session_state.watchlist:
         return ""
 
     st.dataframe(
-        wdf[cols + ["ALERT"]].style.applymap(
-            style, subset=["ALERT"]
-        ),
+        wdf[cols + ["ALERT"]].style.applymap(style, subset=["ALERT"]),
         use_container_width=True,
     )
 
-    remove = st.multiselect(
-        "Remove bonds", st.session_state.watchlist
-    )
+    remove = st.multiselect("Remove bonds", st.session_state.watchlist)
 
     if st.button("❌ Remove"):
         st.session_state.watchlist = [
