@@ -50,12 +50,17 @@ if "initialized" not in st.session_state:
 # SIDEBAR
 # =====================================================
 st.sidebar.header("Controls")
-series_filter = st.sidebar.multiselect(
-    "Series", ["GS", "SG"], default=["GS"]
-)
+series_filter = st.sidebar.multiselect("Series", ["GS", "SG"], default=["GS"])
 
 if st.sidebar.button("🔄 Refresh prices"):
     st.cache_data.clear()
+
+# =====================================================
+# CUSTOM PRICE INPUT
+# =====================================================
+custom_price = st.sidebar.number_input(
+    "Custom Dirty Price (for yield calc)", value=0.0, format="%.2f"
+)
 
 # =====================================================
 # SETTLEMENT DATE (INDIA T+1)
@@ -107,10 +112,7 @@ def load_master():
     df.columns = df.columns.str.strip().str.upper()
 
     df = df[["SYMBOL", "IP RATE", "REDEMPTION DATE"]]
-    df.rename(
-        columns={"SYMBOL": "Symbol", "IP RATE": "Coupon"},
-        inplace=True,
-    )
+    df.rename(columns={"SYMBOL": "Symbol", "IP RATE": "Coupon"}, inplace=True)
 
     df["REDEMPTION DATE"] = pd.to_datetime(
         df["REDEMPTION DATE"], dayfirst=True, errors="coerce"
@@ -177,7 +179,7 @@ df = df[df["Series"].isin(series_filter)]
 df = df.dropna(subset=["Coupon", "Dirty", "Years"])
 
 # =====================================================
-# LAST INTEREST PAID (LIP) + ACCRUED INTEREST
+# LAST INTEREST PAID + ACCRUED
 # =====================================================
 def last_coupon_date(redemption):
     d = redemption
@@ -188,82 +190,68 @@ def last_coupon_date(redemption):
 df["Last Interest Paid"] = df["REDEMPTION DATE"].apply(last_coupon_date)
 
 df["Days Since"] = df.apply(
-    lambda r: days360_us(r["Last Interest Paid"], SETTLEMENT),
-    axis=1,
+    lambda r: days360_us(r["Last Interest Paid"], SETTLEMENT), axis=1
 )
 
 df["Accrued"] = df["Days Since"] * df["Coupon"] / 360
 df["Clean"] = df["Dirty"] - df["Accrued"]
 
 # =====================================================
-# YTM (CLEAN – ORIGINAL)
+# YTM CALCS
 # =====================================================
-def calc_ytm(r):
+def calc_ytm_clean(r):
     try:
-        return (
-            npf.rate(
-                r["Years"] * 2,
-                r["Coupon"] / 2,
-                -r["Clean"],
-                100,
-            )
-            * 2
-            * 100
-        )
+        return npf.rate(
+            r["Years"] * 2, r["Coupon"] / 2, -r["Clean"], 100
+        ) * 2 * 100
     except:
         return None
 
-df["YTM"] = df.apply(calc_ytm, axis=1)
-
-# =====================================================
-# YTM (DIRTY – NEW)
-# =====================================================
 def calc_ytm_dirty(r):
     try:
-        return (
-            npf.rate(
-                r["Years"] * 2,
-                r["Coupon"] / 2,
-                -r["Dirty"],
-                100,
-            )
-            * 2
-            * 100
-        )
+        return npf.rate(
+            r["Years"] * 2, r["Coupon"] / 2, -r["Dirty"], 100
+        ) * 2 * 100
     except:
         return None
 
+def calc_ytm_bid_dirty(r):
+    try:
+        if r["Bid"] <= 0:
+            return None
+        bid_dirty = r["Bid"] + r["Accrued"]
+        return npf.rate(
+            r["Years"] * 2, r["Coupon"] / 2, -bid_dirty, 100
+        ) * 2 * 100
+    except:
+        return None
+
+def calc_ytm_ask_dirty(r):
+    try:
+        if r["Ask"] <= 0:
+            return None
+        ask_dirty = r["Ask"] + r["Accrued"]
+        return npf.rate(
+            r["Years"] * 2, r["Coupon"] / 2, -ask_dirty, 100
+        ) * 2 * 100
+    except:
+        return None
+
+def calc_ytm_custom_dirty(r):
+    try:
+        if custom_price <= 0:
+            return None
+        return npf.rate(
+            r["Years"] * 2, r["Coupon"] / 2, -custom_price, 100
+        ) * 2 * 100
+    except:
+        return None
+
+df["YTM"] = df.apply(calc_ytm_clean, axis=1)
 df["YTM_Dirty"] = df.apply(calc_ytm_dirty, axis=1)
-
-# =====================================================
-# ALERT LOGIC
-# =====================================================
-def alert_status(r):
-    a = st.session_state.alerts.get(r["Symbol"])
-    if not a or a["target"] == 0:
-        return "—"
-
-    side, target, tol = a["side"], a["target"], a["tolerance"]
-
-    if side == "SELL":
-        bid = r["Bid"]
-        if bid >= target:
-            return "HIT"
-        elif (target - bid) <= tol:
-            return "NEAR"
-        else:
-            return "FAR"
-
-    if side == "BUY":
-        ask = r["Ask"]
-        if ask <= target:
-            return "HIT"
-        elif (ask - target) <= tol:
-            return "NEAR"
-        else:
-            return "FAR"
-
-    return "—"
+df["YTM_Bid_Dirty"] = df.apply(calc_ytm_bid_dirty, axis=1)
+df["YTM_Ask_Dirty"] = df.apply(calc_ytm_ask_dirty, axis=1)
+df["YTM_Custom_Dirty"] = df.apply(calc_ytm_custom_dirty, axis=1)
 
 # =====================================================
 # MARKET VIEW
@@ -283,106 +271,9 @@ cols = [
     "Last Interest Paid",
     "YTM",
     "YTM_Dirty",
+    "YTM_Bid_Dirty",
+    "YTM_Ask_Dirty",
+    "YTM_Custom_Dirty",
 ]
 
 st.dataframe(df[cols], use_container_width=True)
-
-# =====================================================
-# WATCHLIST
-# =====================================================
-st.subheader("Watchlist")
-
-all_symbols = sorted(df["Symbol"].unique())
-quick_add = st.selectbox(
-    "Add bond (type to search)", [""] + all_symbols
-)
-
-if quick_add and quick_add not in st.session_state.watchlist:
-    st.session_state.watchlist.append(quick_add)
-    save_persistent_state()
-
-paste = st.text_area("Paste from Excel (one per line)")
-
-if st.button("➕ Add pasted"):
-    items = [x.strip().upper() for x in paste.splitlines() if x.strip()]
-    st.session_state.watchlist = list(
-        dict.fromkeys(st.session_state.watchlist + items)
-    )
-    save_persistent_state()
-
-# =====================================================
-# ALERT SETUP
-# =====================================================
-st.markdown("### 🎯 Alert Setup")
-
-alert_sym = st.selectbox(
-    "Bond", [""] + st.session_state.watchlist
-)
-
-if alert_sym:
-    c1, c2, c3 = st.columns(3)
-
-    with c1:
-        side = st.selectbox("Side", ["BUY", "SELL"])
-    with c2:
-        target = st.number_input("Target", format="%.2f")
-    with c3:
-        tol = st.number_input(
-            "Tolerance", value=0.02, format="%.2f"
-        )
-
-    if st.button("💾 Save Alert"):
-        st.session_state.alerts[alert_sym] = {
-            "side": side,
-            "target": target,
-            "tolerance": tol,
-        }
-        save_persistent_state()
-
-# =====================================================
-# WATCHLIST TABLE + SOUND
-# =====================================================
-if st.session_state.watchlist:
-    wdf = df[df["Symbol"].isin(st.session_state.watchlist)].copy()
-    wdf["ALERT"] = wdf.apply(alert_status, axis=1)
-
-    for _, r in wdf.iterrows():
-        sym = r["Symbol"]
-        new = r["ALERT"]
-        old = st.session_state.last_alert_state.get(sym)
-
-        if new != old:
-            if new == "NEAR":
-                play_near_sound()
-            elif new == "HIT":
-                play_hit_sound()
-
-            st.session_state.last_alert_state[sym] = new
-
-    def style(v):
-        if v == "HIT":
-            return "background-color:#ff4d4d;color:white;"
-        if v == "NEAR":
-            return "background-color:#ffa500;"
-        if v == "FAR":
-            return "background-color:#e0e0e0;"
-        return ""
-
-    st.dataframe(
-        wdf[cols + ["ALERT"]].style.applymap(
-            style, subset=["ALERT"]
-        ),
-        use_container_width=True,
-    )
-
-    remove = st.multiselect(
-        "Remove bonds", st.session_state.watchlist
-    )
-
-    if st.button("❌ Remove"):
-        st.session_state.watchlist = [
-            x for x in st.session_state.watchlist if x not in remove
-        ]
-        save_persistent_state()
-else:
-    st.info("Watchlist empty.")
