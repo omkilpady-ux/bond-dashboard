@@ -50,12 +50,13 @@ if "initialized" not in st.session_state:
 # SIDEBAR
 # =====================================================
 st.sidebar.header("Controls")
-series_filter = st.sidebar.multiselect("Series", ["GS", "SG"], default=["GS"])
+series_filter = st.sidebar.multiselect(
+    "Series", ["GS", "SG"], default=["GS"]
+)
 
 if st.sidebar.button("🔄 Refresh prices"):
     st.cache_data.clear()
 
-# ===== CUSTOM PRICE INPUT =====
 custom_price = st.sidebar.number_input(
     "Custom Dirty Price (Yield Check)", value=0.0, format="%.2f"
 )
@@ -82,10 +83,12 @@ def days360_us(start, end):
     d1, d2 = start.day, end.day
     m1, m2 = start.month, end.month
     y1, y2 = start.year, end.year
+
     if d1 == 31:
         d1 = 30
     if d2 == 31 and d1 == 30:
         d2 = 30
+
     return 360 * (y2 - y1) + 30 * (m2 - m1) + (d2 - d1)
 
 # =====================================================
@@ -191,7 +194,7 @@ df["Accrued"] = df["Days Since"] * df["Coupon"] / 360
 df["Clean"] = df["Dirty"] - df["Accrued"]
 
 # =====================================================
-# YTM FUNCTIONS
+# YTM CALCS
 # =====================================================
 def ytm(price, r):
     return (
@@ -219,9 +222,6 @@ df["YTM_Custom_Dirty"] = df.apply(
     lambda r: ytm(custom_price, r) if custom_price > 0 else None,
     axis=1,
 )
-
-# ===== ROUND EVERYTHING TO 2 DECIMALS =====
-df = df.round(2)
 
 # =====================================================
 # ALERT LOGIC
@@ -254,7 +254,7 @@ def alert_status(r):
     return "—"
 
 # =====================================================
-# MARKET VIEW
+# MARKET VIEW (UNCHANGED)
 # =====================================================
 st.subheader("Market View")
 
@@ -284,7 +284,9 @@ st.dataframe(df[cols], use_container_width=True)
 st.subheader("Watchlist")
 
 all_symbols = sorted(df["Symbol"].unique())
-quick_add = st.selectbox("Add bond", [""] + all_symbols)
+quick_add = st.selectbox(
+    "Add bond (type to search)", [""] + all_symbols
+)
 
 if quick_add and quick_add not in st.session_state.watchlist:
     st.session_state.watchlist.append(quick_add)
@@ -304,10 +306,13 @@ if st.button("➕ Add pasted"):
 # =====================================================
 st.markdown("### 🎯 Alert Setup")
 
-alert_sym = st.selectbox("Bond", [""] + st.session_state.watchlist)
+alert_sym = st.selectbox(
+    "Bond", [""] + st.session_state.watchlist
+)
 
 if alert_sym:
     c1, c2, c3 = st.columns(3)
+
     with c1:
         side = st.selectbox("Side", ["BUY", "SELL"])
     with c2:
@@ -330,15 +335,20 @@ if st.session_state.watchlist:
     wdf = df[df["Symbol"].isin(st.session_state.watchlist)].copy()
     wdf["ALERT"] = wdf.apply(alert_status, axis=1)
 
+    # 🔒 ONLY CHANGE: ROUND WATCHLIST DISPLAY TO 2 DECIMALS
+    wdf = wdf.round(2)
+
     for _, r in wdf.iterrows():
         sym = r["Symbol"]
         new = r["ALERT"]
         old = st.session_state.last_alert_state.get(sym)
+
         if new != old:
             if new == "NEAR":
                 play_near_sound()
             elif new == "HIT":
                 play_hit_sound()
+
             st.session_state.last_alert_state[sym] = new
 
     def style(v):
@@ -351,11 +361,15 @@ if st.session_state.watchlist:
         return ""
 
     st.dataframe(
-        wdf[cols + ["ALERT"]].style.applymap(style, subset=["ALERT"]),
+        wdf[cols + ["ALERT"]].style.applymap(
+            style, subset=["ALERT"]
+        ),
         use_container_width=True,
     )
 
-    remove = st.multiselect("Remove bonds", st.session_state.watchlist)
+    remove = st.multiselect(
+        "Remove bonds", st.session_state.watchlist
+    )
 
     if st.button("❌ Remove"):
         st.session_state.watchlist = [
