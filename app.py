@@ -7,6 +7,7 @@ from dateutil.relativedelta import relativedelta
 import base64
 import json
 from pathlib import Path
+import time
 
 # =====================================================
 # PERSISTENCE
@@ -191,17 +192,34 @@ def load_live():
     try:
         s = requests.Session()
         s.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Accept": "application/json",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "*/*",
             "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Referer": "https://www.nseindia.com/market-data/bonds-traded-in-capital-market",
         })
         
-        s.get("https://www.nseindia.com", timeout=15)
+        # Get cookies first - critical for NSE
+        s.get("https://www.nseindia.com/market-data/bonds-traded-in-capital-market", timeout=15)
+        
+        # Small delay to mimic human behavior
+        time.sleep(1)
 
         url = "https://www.nseindia.com/api/liveBonds-traded-on-cm?type=gsec"
         resp = s.get(url, timeout=15)
         
-        data = resp.json().get("data", [])
+        # Check if response is valid JSON
+        if resp.status_code != 200:
+            st.warning(f"NSE returned status code: {resp.status_code}")
+            return pd.DataFrame(rows)
+        
+        try:
+            json_data = resp.json()
+        except:
+            st.warning("NSE returned invalid data. They may be blocking requests. Try again in a few minutes.")
+            return pd.DataFrame(rows)
+        
+        data = json_data.get("data", [])
 
         for d in data:
             if not isinstance(d, dict):
@@ -222,7 +240,7 @@ def load_live():
                 }
             )
     except Exception as e:
-        st.error(f"NSE API Error: {str(e)}")
+        st.warning(f"Cannot reach NSE right now: {str(e)}")
 
     return pd.DataFrame(rows)
 
@@ -438,10 +456,6 @@ def generate_opportunities(df, threshold, vol_mult, min_vol):
                     "Reason": f"Volume {mult:.1f}x higher than usual",
                     "Priority": 100 + mult  # Medium priority
                 })
-        
-        # PRIORITY 4: Spread improvement (was wide, now tight)
-        # We'll need historical spread data for this - coming soon
-        # For now, we'll skip this to avoid noise
     
     # Sort by priority (highest first) and return top N
     opportunities.sort(key=lambda x: x["Priority"], reverse=True)
@@ -467,7 +481,6 @@ if opportunities:
         use_container_width=True,
         hide_index=True
     )
-
 else:
     st.info("No opportunities detected with current settings. Try adjusting scanner thresholds in sidebar.")
 
@@ -509,19 +522,6 @@ def alert_status(r):
 # MARKET VIEW
 # =====================================================
 st.subheader("Market View")
-
-# Add color coding helper
-def color_ytm(val, avg, threshold):
-    """Color code YTM cells based on deviation from average"""
-    if pd.isna(val) or not avg:
-        return ''
-    
-    diff = val - avg
-    if diff > threshold:
-        return 'background-color: #d4edda'  # Green (buy)
-    elif diff < -threshold:
-        return 'background-color: #f8d7da'  # Red (sell)
-    return ''
 
 cols = [
     "Symbol", "Series", "Bid", "Ask", "LTP", "Volume",
