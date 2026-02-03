@@ -637,7 +637,7 @@ if st.session_state.watchlist:
         return ""
 
     wcols = [
-        "Symbol", "Series", "Bid", "Ask", "Volume",
+        "Symbol", "Series", "Bid", "Ask", "LTP", "Volume",
         "Spread", "Bid YTM", "Ask YTM", "ALERT"
     ]
 
