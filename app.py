@@ -7,7 +7,6 @@ from dateutil.relativedelta import relativedelta
 import base64
 import json
 from pathlib import Path
-import time
 
 # =====================================================
 # PERSISTENCE
@@ -192,34 +191,17 @@ def load_live():
     try:
         s = requests.Session()
         s.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "*/*",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "application/json",
             "Accept-Language": "en-US,en;q=0.9",
-            "Accept-Encoding": "gzip, deflate, br",
-            "Referer": "https://www.nseindia.com/market-data/bonds-traded-in-capital-market",
         })
         
-        # Get cookies first - critical for NSE
-        s.get("https://www.nseindia.com/market-data/bonds-traded-in-capital-market", timeout=15)
-        
-        # Small delay to mimic human behavior
-        time.sleep(1)
+        s.get("https://www.nseindia.com", timeout=15)
 
         url = "https://www.nseindia.com/api/liveBonds-traded-on-cm?type=gsec"
         resp = s.get(url, timeout=15)
         
-        # Check if response is valid JSON
-        if resp.status_code != 200:
-            st.warning(f"NSE returned status code: {resp.status_code}")
-            return pd.DataFrame(rows)
-        
-        try:
-            json_data = resp.json()
-        except:
-            st.warning("NSE returned invalid data. They may be blocking requests. Try again in a few minutes.")
-            return pd.DataFrame(rows)
-        
-        data = json_data.get("data", [])
+        data = resp.json().get("data", [])
 
         for d in data:
             if not isinstance(d, dict):
@@ -240,7 +222,7 @@ def load_live():
                 }
             )
     except Exception as e:
-        st.warning(f"Cannot reach NSE right now: {str(e)}")
+        st.error(f"NSE API Error: {str(e)}")
 
     return pd.DataFrame(rows)
 
@@ -417,47 +399,60 @@ def generate_opportunities(df, threshold, vol_mult, min_vol):
             continue
         
         avg_data = r["7D Avg"]
+        signals = []
         
-        # PRIORITY 1: High Ask YTM = BUY opportunity
+        # High Ask YTM = BUY opportunity
         if pd.notna(r["Ask YTM"]) and avg_data["ask_avg"]:
             diff = r["Ask YTM"] - avg_data["ask_avg"]
             if diff > threshold:
-                opportunities.append({
+                signals.append({
                     "Symbol": r["Symbol"],
                     "Bid YTM": r["Bid YTM"],
                     "Ask YTM": r["Ask YTM"],
                     "Signal": "🟢 BUY",
-                    "Reason": f"Ask yield +{diff:.2f}% vs 7D avg",
-                    "Priority": 1000 + diff  # Highest priority
+                    "Reason": f"Ask YTM +{diff:.2f}% vs 7D avg",
+                    "Priority": diff  # for sorting
                 })
         
-        # PRIORITY 2: Low Bid YTM = SELL opportunity
+        # Low Bid YTM = SELL opportunity
         if pd.notna(r["Bid YTM"]) and avg_data["bid_avg"]:
             diff = avg_data["bid_avg"] - r["Bid YTM"]
             if diff > threshold:
-                opportunities.append({
+                signals.append({
                     "Symbol": r["Symbol"],
                     "Bid YTM": r["Bid YTM"],
                     "Ask YTM": r["Ask YTM"],
                     "Signal": "🔴 SELL",
-                    "Reason": f"Bid yield -{diff:.2f}% vs 7D avg",
-                    "Priority": 1000 + diff  # Highest priority
+                    "Reason": f"Bid YTM -{diff:.2f}% vs 7D avg",
+                    "Priority": diff
                 })
         
-        # PRIORITY 3: Volume spike
-        if avg_data["vol_avg"] and avg_data["vol_avg"] > 0:
-            if r["Volume"] > avg_data["vol_avg"] * vol_mult:
-                mult = r["Volume"] / avg_data["vol_avg"]
-                opportunities.append({
-                    "Symbol": r["Symbol"],
-                    "Bid YTM": r["Bid YTM"],
-                    "Ask YTM": r["Ask YTM"],
-                    "Signal": "⚡ VOLUME",
-                    "Reason": f"Volume {mult:.1f}x higher than usual",
-                    "Priority": 100 + mult  # Medium priority
-                })
+        # Volume spike
+        if avg_data["vol_avg"] and r["Volume"] > avg_data["vol_avg"] * vol_mult:
+            mult = r["Volume"] / avg_data["vol_avg"]
+            signals.append({
+                "Symbol": r["Symbol"],
+                "Bid YTM": r["Bid YTM"],
+                "Ask YTM": r["Ask YTM"],
+                "Signal": "⚡ VOLUME",
+                "Reason": f"Volume {mult:.1f}x avg",
+                "Priority": mult
+            })
+        
+        # Tight spread = good liquidity
+        if r["Spread"] > 0 and r["Spread"] < 0.10:
+            signals.append({
+                "Symbol": r["Symbol"],
+                "Bid YTM": r["Bid YTM"],
+                "Ask YTM": r["Ask YTM"],
+                "Signal": "💎 LIQUID",
+                "Reason": f"Tight spread ({r['Spread']:.2f})",
+                "Priority": 0.10 - r["Spread"]
+            })
+        
+        opportunities.extend(signals)
     
-    # Sort by priority (highest first) and return top N
+    # Sort by priority and return top N
     opportunities.sort(key=lambda x: x["Priority"], reverse=True)
     return opportunities[:max_opportunities]
 
@@ -476,8 +471,19 @@ if opportunities:
     opp_df["Bid YTM"] = opp_df["Bid YTM"].apply(lambda x: f"{x:.2f}%" if pd.notna(x) else "—")
     opp_df["Ask YTM"] = opp_df["Ask YTM"].apply(lambda x: f"{x:.2f}%" if pd.notna(x) else "—")
     
+    def highlight_signal(row):
+        if "BUY" in row["Signal"]:
+            return ['background-color: #d4edda'] * len(row)
+        elif "SELL" in row["Signal"]:
+            return ['background-color: #f8d7da'] * len(row)
+        elif "VOLUME" in row["Signal"]:
+            return ['background-color: #fff3cd'] * len(row)
+        elif "LIQUID" in row["Signal"]:
+            return ['background-color: #d1ecf1'] * len(row)
+        return [''] * len(row)
+    
     st.dataframe(
-        opp_df,
+        opp_df.style.apply(highlight_signal, axis=1),
         use_container_width=True,
         hide_index=True
     )
@@ -522,6 +528,19 @@ def alert_status(r):
 # MARKET VIEW
 # =====================================================
 st.subheader("Market View")
+
+# Add color coding helper
+def color_ytm(val, avg, threshold):
+    """Color code YTM cells based on deviation from average"""
+    if pd.isna(val) or not avg:
+        return ''
+    
+    diff = val - avg
+    if diff > threshold:
+        return 'background-color: #d4edda'  # Green (buy)
+    elif diff < -threshold:
+        return 'background-color: #f8d7da'  # Red (sell)
+    return ''
 
 cols = [
     "Symbol", "Series", "Bid", "Ask", "LTP", "Volume",
@@ -618,7 +637,7 @@ if st.session_state.watchlist:
         return ""
 
     wcols = [
-        "Symbol", "Series", "Bid", "Ask", "LTP", "Volume",
+        "Symbol", "Series", "Bid", "Ask", "Volume",
         "Spread", "Bid YTM", "Ask YTM", "ALERT"
     ]
 
