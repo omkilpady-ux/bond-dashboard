@@ -399,60 +399,51 @@ def generate_opportunities(df, threshold, vol_mult, min_vol):
             continue
         
         avg_data = r["7D Avg"]
-        signals = []
         
-        # High Ask YTM = BUY opportunity
+        # PRIORITY 1: High Ask YTM = BUY opportunity
         if pd.notna(r["Ask YTM"]) and avg_data["ask_avg"]:
             diff = r["Ask YTM"] - avg_data["ask_avg"]
             if diff > threshold:
-                signals.append({
+                opportunities.append({
                     "Symbol": r["Symbol"],
                     "Bid YTM": r["Bid YTM"],
                     "Ask YTM": r["Ask YTM"],
                     "Signal": "🟢 BUY",
-                    "Reason": f"Ask YTM +{diff:.2f}% vs 7D avg",
-                    "Priority": diff  # for sorting
+                    "Reason": f"Ask yield +{diff:.2f}% vs 7D avg",
+                    "Priority": 1000 + diff  # Highest priority
                 })
         
-        # Low Bid YTM = SELL opportunity
+        # PRIORITY 2: Low Bid YTM = SELL opportunity
         if pd.notna(r["Bid YTM"]) and avg_data["bid_avg"]:
             diff = avg_data["bid_avg"] - r["Bid YTM"]
             if diff > threshold:
-                signals.append({
+                opportunities.append({
                     "Symbol": r["Symbol"],
                     "Bid YTM": r["Bid YTM"],
                     "Ask YTM": r["Ask YTM"],
                     "Signal": "🔴 SELL",
-                    "Reason": f"Bid YTM -{diff:.2f}% vs 7D avg",
-                    "Priority": diff
+                    "Reason": f"Bid yield -{diff:.2f}% vs 7D avg",
+                    "Priority": 1000 + diff  # Highest priority
                 })
         
-        # Volume spike
-        if avg_data["vol_avg"] and r["Volume"] > avg_data["vol_avg"] * vol_mult:
-            mult = r["Volume"] / avg_data["vol_avg"]
-            signals.append({
-                "Symbol": r["Symbol"],
-                "Bid YTM": r["Bid YTM"],
-                "Ask YTM": r["Ask YTM"],
-                "Signal": "⚡ VOLUME",
-                "Reason": f"Volume {mult:.1f}x avg",
-                "Priority": mult
-            })
+        # PRIORITY 3: Volume spike
+        if avg_data["vol_avg"] and avg_data["vol_avg"] > 0:
+            if r["Volume"] > avg_data["vol_avg"] * vol_mult:
+                mult = r["Volume"] / avg_data["vol_avg"]
+                opportunities.append({
+                    "Symbol": r["Symbol"],
+                    "Bid YTM": r["Bid YTM"],
+                    "Ask YTM": r["Ask YTM"],
+                    "Signal": "⚡ VOLUME",
+                    "Reason": f"Volume {mult:.1f}x higher than usual",
+                    "Priority": 100 + mult  # Medium priority
+                })
         
-        # Tight spread = good liquidity
-        if r["Spread"] > 0 and r["Spread"] < 0.10:
-            signals.append({
-                "Symbol": r["Symbol"],
-                "Bid YTM": r["Bid YTM"],
-                "Ask YTM": r["Ask YTM"],
-                "Signal": "💎 LIQUID",
-                "Reason": f"Tight spread ({r['Spread']:.2f})",
-                "Priority": 0.10 - r["Spread"]
-            })
-        
-        opportunities.extend(signals)
+        # PRIORITY 4: Spread improvement (was wide, now tight)
+        # We'll need historical spread data for this - coming soon
+        # For now, we'll skip this to avoid noise
     
-    # Sort by priority and return top N
+    # Sort by priority (highest first) and return top N
     opportunities.sort(key=lambda x: x["Priority"], reverse=True)
     return opportunities[:max_opportunities]
 
