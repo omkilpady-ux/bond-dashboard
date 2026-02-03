@@ -12,6 +12,7 @@ from pathlib import Path
 # PERSISTENCE
 # =====================================================
 STATE_FILE = Path("user_state.json")
+HISTORY_FILE = Path("yield_history.json")
 
 def load_persistent_state():
     if STATE_FILE.exists():
@@ -28,6 +29,16 @@ def save_persistent_state():
             },
             f,
         )
+
+def load_yield_history():
+    if HISTORY_FILE.exists():
+        with open(HISTORY_FILE, "r") as f:
+            return json.load(f)
+    return {}
+
+def save_yield_history(history):
+    with open(HISTORY_FILE, "w") as f:
+        json.dump(history, f)
 
 # =====================================================
 # PAGE SETUP
@@ -47,7 +58,7 @@ if "initialized" not in st.session_state:
     st.session_state.initialized = True
 
 # =====================================================
-# SIDEBAR
+# SIDEBAR - SCANNER SETTINGS
 # =====================================================
 st.sidebar.header("Controls")
 
@@ -59,6 +70,41 @@ series_filter = st.sidebar.multiselect(
 
 if st.sidebar.button("🔄 Refresh prices"):
     st.cache_data.clear()
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("📊 Scanner Settings")
+
+yield_threshold = st.sidebar.slider(
+    "Yield change threshold (%)",
+    min_value=0.05,
+    max_value=0.50,
+    value=0.20,
+    step=0.05,
+    help="Alert when yield moves by this much vs 7-day average"
+)
+
+volume_multiplier = st.sidebar.slider(
+    "Volume spike multiplier",
+    min_value=1.5,
+    max_value=5.0,
+    value=2.0,
+    step=0.5,
+    help="Alert when volume is this many times higher than yesterday"
+)
+
+min_volume = st.sidebar.number_input(
+    "Minimum volume to show",
+    min_value=0,
+    value=10,
+    step=5,
+    help="Ignore bonds with volume below this"
+)
+
+max_opportunities = st.sidebar.selectbox(
+    "Show top opportunities",
+    [5, 10, 15, 20, 50],
+    index=1
+)
 
 # =====================================================
 # SETTLEMENT DATE (INDIA T+1)
@@ -131,7 +177,7 @@ def load_master():
     df["Years"] = (
         pd.to_datetime(df["REDEMPTION DATE"]) -
         pd.to_datetime(SETTLEMENT)
-    ).dt.days / 365.25  # Changed to 365.25 for better accuracy
+    ).dt.days / 365.25
 
     return df[df["Years"] > 0]
 
@@ -150,7 +196,6 @@ def load_live():
             "Accept-Language": "en-US,en;q=0.9",
         })
         
-        # Get cookies first
         s.get("https://www.nseindia.com", timeout=15)
 
         url = "https://www.nseindia.com/api/liveBonds-traded-on-cm?type=gsec"
@@ -187,14 +232,12 @@ def load_live():
 master = load_master()
 live = load_live()
 
-# Don't stop the app if live data fails - show what we have
 if master.empty:
     st.error("Master data file (master_debt.csv) not found or empty!")
     st.stop()
 
 if live.empty:
     st.warning("⚠️ Live data unavailable from NSE. Showing master data only. Click 'Refresh prices' to retry.")
-    # Create empty dataframe with master data
     df = master.copy()
     df["Series"] = ""
     df["Bid"] = 0
@@ -226,48 +269,24 @@ df["Days Since"] = df.apply(
 df["Accrued"] = df["Days Since"] * df["Coupon"] / 360
 
 # =====================================================
-# CLEAN PRICE LOGIC (BID FIRST, THEN LTP)
+# YTM CALCULATION HELPER
 # =====================================================
-def get_clean_price(r):
-    """
-    Use Bid price first (most recent tradeable price).
-    If no Bid, fall back to LTP.
-    Then subtract accrued interest to get clean price.
-    """
-    if r["Bid"] > 0:
-        dirty_price = r["Bid"]
-    elif r["LTP"] > 0:
-        dirty_price = r["LTP"]
-    else:
+def calculate_ytm(price, coupon, years):
+    """Generic YTM calculator"""
+    if pd.isna(price) or price is None or price <= 0:
         return None
     
-    return dirty_price - r["Accrued"]
-
-df["Clean"] = df.apply(get_clean_price, axis=1)
-
-# =====================================================
-# YTM CALCULATION (ON CLEAN PRICE)
-# =====================================================
-def calc_ytm(r):
-    """
-    Calculate YTM based on clean price.
-    Clean price already accounts for using Bid (or LTP if no Bid).
-    """
-    if pd.isna(r["Clean"]) or r["Clean"] is None or r["Clean"] <= 0:
-        return None
-    
-    if r["Years"] <= 0 or r["Coupon"] <= 0:
+    if years <= 0 or coupon <= 0:
         return None
     
     try:
         ytm = npf.rate(
-            nper=r["Years"] * 2,  # Semi-annual payments
-            pmt=r["Coupon"] / 2,  # Semi-annual coupon
-            pv=-r["Clean"],       # Negative because it's a cash outflow
-            fv=100,               # Face value at maturity
-        ) * 2 * 100  # Convert to annual percentage
+            nper=years * 2,
+            pmt=coupon / 2,
+            pv=-price,
+            fv=100,
+        ) * 2 * 100
         
-        # Sanity check: YTM should be reasonable (between -10% and 50%)
         if -10 < ytm < 50:
             return ytm
         else:
@@ -275,7 +294,201 @@ def calc_ytm(r):
     except:
         return None
 
-df["YTM"] = df.apply(calc_ytm, axis=1)
+# =====================================================
+# BID YTM (SELLING YIELD)
+# =====================================================
+def get_bid_ytm(r):
+    """YTM based on Bid price (what you get when SELLING)"""
+    if r["Bid"] > 0:
+        clean_bid = r["Bid"] - r["Accrued"]
+        return calculate_ytm(clean_bid, r["Coupon"], r["Years"])
+    elif r["LTP"] > 0:
+        clean_ltp = r["LTP"] - r["Accrued"]
+        return calculate_ytm(clean_ltp, r["Coupon"], r["Years"])
+    return None
+
+df["Bid YTM"] = df.apply(get_bid_ytm, axis=1)
+
+# =====================================================
+# ASK YTM (BUYING YIELD)
+# =====================================================
+def get_ask_ytm(r):
+    """YTM based on Ask price (what you get when BUYING)"""
+    if r["Ask"] > 0:
+        clean_ask = r["Ask"] - r["Accrued"]
+        return calculate_ytm(clean_ask, r["Coupon"], r["Years"])
+    elif r["LTP"] > 0:
+        clean_ltp = r["LTP"] - r["Accrued"]
+        return calculate_ytm(clean_ltp, r["Coupon"], r["Years"])
+    return None
+
+df["Ask YTM"] = df.apply(get_ask_ytm, axis=1)
+
+# =====================================================
+# BID-ASK SPREAD
+# =====================================================
+df["Spread"] = df["Ask"] - df["Bid"]
+
+# =====================================================
+# YIELD HISTORY TRACKING
+# =====================================================
+def update_yield_history(df):
+    """Track 7-day yield history"""
+    history = load_yield_history()
+    today = datetime.now().strftime("%Y-%m-%d")
+    
+    if today not in history:
+        history[today] = {}
+    
+    for _, row in df.iterrows():
+        sym = row["Symbol"]
+        if pd.notna(row["Bid YTM"]):
+            if sym not in history[today]:
+                history[today][sym] = {
+                    "bid_ytm": row["Bid YTM"],
+                    "ask_ytm": row["Ask YTM"] if pd.notna(row["Ask YTM"]) else None,
+                    "volume": row["Volume"]
+                }
+    
+    # Keep only last 7 days
+    all_dates = sorted(history.keys())
+    if len(all_dates) > 7:
+        for old_date in all_dates[:-7]:
+            del history[old_date]
+    
+    save_yield_history(history)
+    return history
+
+history = update_yield_history(df)
+
+# =====================================================
+# 7-DAY AVERAGE YIELD
+# =====================================================
+def get_7d_avg_yield(symbol, history):
+    """Calculate 7-day average for Bid YTM and Ask YTM"""
+    bid_yields = []
+    ask_yields = []
+    volumes = []
+    
+    for date_data in history.values():
+        if symbol in date_data:
+            if date_data[symbol]["bid_ytm"]:
+                bid_yields.append(date_data[symbol]["bid_ytm"])
+            if date_data[symbol]["ask_ytm"]:
+                ask_yields.append(date_data[symbol]["ask_ytm"])
+            if date_data[symbol]["volume"]:
+                volumes.append(date_data[symbol]["volume"])
+    
+    return {
+        "bid_avg": sum(bid_yields) / len(bid_yields) if bid_yields else None,
+        "ask_avg": sum(ask_yields) / len(ask_yields) if ask_yields else None,
+        "vol_avg": sum(volumes) / len(volumes) if volumes else None
+    }
+
+df["7D Avg"] = df["Symbol"].apply(lambda s: get_7d_avg_yield(s, history))
+
+# =====================================================
+# OPPORTUNITY SCANNER
+# =====================================================
+def generate_opportunities(df, threshold, vol_mult, min_vol):
+    """Generate trading opportunities"""
+    opportunities = []
+    
+    for _, r in df.iterrows():
+        if r["Volume"] < min_vol:
+            continue
+        
+        avg_data = r["7D Avg"]
+        signals = []
+        
+        # High Ask YTM = BUY opportunity
+        if pd.notna(r["Ask YTM"]) and avg_data["ask_avg"]:
+            diff = r["Ask YTM"] - avg_data["ask_avg"]
+            if diff > threshold:
+                signals.append({
+                    "Symbol": r["Symbol"],
+                    "Bid YTM": r["Bid YTM"],
+                    "Ask YTM": r["Ask YTM"],
+                    "Signal": "🟢 BUY",
+                    "Reason": f"Ask YTM +{diff:.2f}% vs 7D avg",
+                    "Priority": diff  # for sorting
+                })
+        
+        # Low Bid YTM = SELL opportunity
+        if pd.notna(r["Bid YTM"]) and avg_data["bid_avg"]:
+            diff = avg_data["bid_avg"] - r["Bid YTM"]
+            if diff > threshold:
+                signals.append({
+                    "Symbol": r["Symbol"],
+                    "Bid YTM": r["Bid YTM"],
+                    "Ask YTM": r["Ask YTM"],
+                    "Signal": "🔴 SELL",
+                    "Reason": f"Bid YTM -{diff:.2f}% vs 7D avg",
+                    "Priority": diff
+                })
+        
+        # Volume spike
+        if avg_data["vol_avg"] and r["Volume"] > avg_data["vol_avg"] * vol_mult:
+            mult = r["Volume"] / avg_data["vol_avg"]
+            signals.append({
+                "Symbol": r["Symbol"],
+                "Bid YTM": r["Bid YTM"],
+                "Ask YTM": r["Ask YTM"],
+                "Signal": "⚡ VOLUME",
+                "Reason": f"Volume {mult:.1f}x avg",
+                "Priority": mult
+            })
+        
+        # Tight spread = good liquidity
+        if r["Spread"] > 0 and r["Spread"] < 0.10:
+            signals.append({
+                "Symbol": r["Symbol"],
+                "Bid YTM": r["Bid YTM"],
+                "Ask YTM": r["Ask YTM"],
+                "Signal": "💎 LIQUID",
+                "Reason": f"Tight spread ({r['Spread']:.2f})",
+                "Priority": 0.10 - r["Spread"]
+            })
+        
+        opportunities.extend(signals)
+    
+    # Sort by priority and return top N
+    opportunities.sort(key=lambda x: x["Priority"], reverse=True)
+    return opportunities[:max_opportunities]
+
+opportunities = generate_opportunities(df, yield_threshold, volume_multiplier, min_volume)
+
+# =====================================================
+# OPPORTUNITY SCANNER DISPLAY
+# =====================================================
+st.subheader("🚨 Opportunity Scanner")
+
+if opportunities:
+    opp_df = pd.DataFrame(opportunities)
+    opp_df = opp_df[["Symbol", "Bid YTM", "Ask YTM", "Signal", "Reason"]]
+    
+    # Format YTM columns
+    opp_df["Bid YTM"] = opp_df["Bid YTM"].apply(lambda x: f"{x:.2f}%" if pd.notna(x) else "—")
+    opp_df["Ask YTM"] = opp_df["Ask YTM"].apply(lambda x: f"{x:.2f}%" if pd.notna(x) else "—")
+    
+    def highlight_signal(row):
+        if "BUY" in row["Signal"]:
+            return ['background-color: #d4edda'] * len(row)
+        elif "SELL" in row["Signal"]:
+            return ['background-color: #f8d7da'] * len(row)
+        elif "VOLUME" in row["Signal"]:
+            return ['background-color: #fff3cd'] * len(row)
+        elif "LIQUID" in row["Signal"]:
+            return ['background-color: #d1ecf1'] * len(row)
+        return [''] * len(row)
+    
+    st.dataframe(
+        opp_df.style.apply(highlight_signal, axis=1),
+        use_container_width=True,
+        hide_index=True
+    )
+else:
+    st.info("No opportunities detected with current settings. Try adjusting scanner thresholds in sidebar.")
 
 # =====================================================
 # ALERT LOGIC
@@ -316,13 +529,30 @@ def alert_status(r):
 # =====================================================
 st.subheader("Market View")
 
+# Add color coding helper
+def color_ytm(val, avg, threshold):
+    """Color code YTM cells based on deviation from average"""
+    if pd.isna(val) or not avg:
+        return ''
+    
+    diff = val - avg
+    if diff > threshold:
+        return 'background-color: #d4edda'  # Green (buy)
+    elif diff < -threshold:
+        return 'background-color: #f8d7da'  # Red (sell)
+    return ''
+
 cols = [
     "Symbol", "Series", "Bid", "Ask", "LTP", "Volume",
-    "Dirty", "Accrued", "Clean",
-    "Last Interest Paid", "YTM",
+    "Spread", "Accrued", "Bid YTM", "Ask YTM"
 ]
 
-st.dataframe(df[cols], use_container_width=True)
+# Format display
+display_df = df[cols].copy()
+display_df["Bid YTM"] = display_df["Bid YTM"].apply(lambda x: f"{x:.2f}%" if pd.notna(x) else "—")
+display_df["Ask YTM"] = display_df["Ask YTM"].apply(lambda x: f"{x:.2f}%" if pd.notna(x) else "—")
+
+st.dataframe(display_df, use_container_width=True)
 
 # =====================================================
 # WATCHLIST
@@ -406,8 +636,17 @@ if st.session_state.watchlist:
             return "background-color:#e0e0e0;"
         return ""
 
+    wcols = [
+        "Symbol", "Series", "Bid", "Ask", "Volume",
+        "Spread", "Bid YTM", "Ask YTM", "ALERT"
+    ]
+
+    wdf_display = wdf[wcols].copy()
+    wdf_display["Bid YTM"] = wdf_display["Bid YTM"].apply(lambda x: f"{x:.2f}%" if pd.notna(x) else "—")
+    wdf_display["Ask YTM"] = wdf_display["Ask YTM"].apply(lambda x: f"{x:.2f}%" if pd.notna(x) else "—")
+
     st.dataframe(
-        wdf[cols + ["ALERT"]].style.applymap(style, subset=["ALERT"]),
+        wdf_display.style.applymap(style, subset=["ALERT"]),
         use_container_width=True,
     )
 
