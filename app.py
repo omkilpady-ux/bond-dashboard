@@ -471,22 +471,12 @@ if opportunities:
     opp_df["Bid YTM"] = opp_df["Bid YTM"].apply(lambda x: f"{x:.2f}%" if pd.notna(x) else "—")
     opp_df["Ask YTM"] = opp_df["Ask YTM"].apply(lambda x: f"{x:.2f}%" if pd.notna(x) else "—")
     
-    def highlight_signal(row):
-        if "BUY" in row["Signal"]:
-            return ['background-color: #d4edda'] * len(row)
-        elif "SELL" in row["Signal"]:
-            return ['background-color: #f8d7da'] * len(row)
-        elif "VOLUME" in row["Signal"]:
-            return ['background-color: #fff3cd'] * len(row)
-        elif "LIQUID" in row["Signal"]:
-            return ['background-color: #d1ecf1'] * len(row)
-        return [''] * len(row)
-    
     st.dataframe(
-        opp_df.style.apply(highlight_signal, axis=1),
+        opp_df,
         use_container_width=True,
         hide_index=True
     )
+
 else:
     st.info("No opportunities detected with current settings. Try adjusting scanner thresholds in sidebar.")
 
