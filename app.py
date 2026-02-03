@@ -99,7 +99,7 @@ def play_near_sound():
     st.audio(base64.b64decode(beep), format="audio/wav")
 
 def play_hit_sound():
-    beep = "UklGRlIAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YVIAAAB//38AAP//"
+    beep = "UklGRlIAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YSIAAAB//38AAP//"
     st.audio(base64.b64decode(beep), format="audio/wav")
 
 # =====================================================
@@ -131,7 +131,7 @@ def load_master():
     df["Years"] = (
         pd.to_datetime(df["REDEMPTION DATE"]) -
         pd.to_datetime(SETTLEMENT)
-    ).dt.days / 365
+    ).dt.days / 365.25  # Changed to 365.25 for better accuracy
 
     return df[df["Years"] > 0]
 
@@ -144,11 +144,19 @@ def load_live():
 
     try:
         s = requests.Session()
-        s.headers.update({"User-Agent": "Mozilla/5.0"})
-        s.get("https://www.nseindia.com", timeout=10)
+        s.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "application/json",
+            "Accept-Language": "en-US,en;q=0.9",
+        })
+        
+        # Get cookies first
+        s.get("https://www.nseindia.com", timeout=15)
 
         url = "https://www.nseindia.com/api/liveBonds-traded-on-cm?type=gsec"
-        data = s.get(url, timeout=10).json().get("data", [])
+        resp = s.get(url, timeout=15)
+        
+        data = resp.json().get("data", [])
 
         for d in data:
             if not isinstance(d, dict):
@@ -168,8 +176,8 @@ def load_live():
                     "Volume": d.get("totalTradedVolume") or 0,
                 }
             )
-    except:
-        pass
+    except Exception as e:
+        st.error(f"NSE API Error: {str(e)}")
 
     return pd.DataFrame(rows)
 
@@ -179,13 +187,25 @@ def load_live():
 master = load_master()
 live = load_live()
 
-if master.empty or live.empty:
-    st.warning("Live data unavailable. Try refresh.")
+# Don't stop the app if live data fails - show what we have
+if master.empty:
+    st.error("Master data file (master_debt.csv) not found or empty!")
     st.stop()
 
-df = live.merge(master, on="Symbol", how="left")
-df = df[df["Series"].isin(series_filter)]
-df = df.dropna(subset=["Coupon", "Dirty", "Years"])
+if live.empty:
+    st.warning("⚠️ Live data unavailable from NSE. Showing master data only. Click 'Refresh prices' to retry.")
+    # Create empty dataframe with master data
+    df = master.copy()
+    df["Series"] = ""
+    df["Bid"] = 0
+    df["Ask"] = 0
+    df["LTP"] = 0
+    df["Dirty"] = 0
+    df["Volume"] = 0
+else:
+    df = live.merge(master, on="Symbol", how="left")
+    df = df[df["Series"].isin(series_filter)]
+    df = df.dropna(subset=["Coupon", "Years"])
 
 # =====================================================
 # LAST INTEREST PAID + ACCRUED
@@ -204,43 +224,58 @@ df["Days Since"] = df.apply(
 )
 
 df["Accrued"] = df["Days Since"] * df["Coupon"] / 360
-df["Clean"] = df["Dirty"] - df["Accrued"]
 
 # =====================================================
-# YTM (CLEAN)
+# CLEAN PRICE LOGIC (BID FIRST, THEN LTP)
+# =====================================================
+def get_clean_price(r):
+    """
+    Use Bid price first (most recent tradeable price).
+    If no Bid, fall back to LTP.
+    Then subtract accrued interest to get clean price.
+    """
+    if r["Bid"] > 0:
+        dirty_price = r["Bid"]
+    elif r["LTP"] > 0:
+        dirty_price = r["LTP"]
+    else:
+        return None
+    
+    return dirty_price - r["Accrued"]
+
+df["Clean"] = df.apply(get_clean_price, axis=1)
+
+# =====================================================
+# YTM CALCULATION (ON CLEAN PRICE)
 # =====================================================
 def calc_ytm(r):
+    """
+    Calculate YTM based on clean price.
+    Clean price already accounts for using Bid (or LTP if no Bid).
+    """
+    if pd.isna(r["Clean"]) or r["Clean"] is None or r["Clean"] <= 0:
+        return None
+    
+    if r["Years"] <= 0 or r["Coupon"] <= 0:
+        return None
+    
     try:
-        return (
-            npf.rate(
-                r["Years"] * 2,
-                r["Coupon"] / 2,
-                -r["Clean"],
-                100,
-            ) * 2 * 100
-        )
+        ytm = npf.rate(
+            nper=r["Years"] * 2,  # Semi-annual payments
+            pmt=r["Coupon"] / 2,  # Semi-annual coupon
+            pv=-r["Clean"],       # Negative because it's a cash outflow
+            fv=100,               # Face value at maturity
+        ) * 2 * 100  # Convert to annual percentage
+        
+        # Sanity check: YTM should be reasonable (between -10% and 50%)
+        if -10 < ytm < 50:
+            return ytm
+        else:
+            return None
     except:
         return None
 
 df["YTM"] = df.apply(calc_ytm, axis=1)
-
-# =====================================================
-# YTM (DIRTY)
-# =====================================================
-def calc_ytm_dirty(r):
-    try:
-        return (
-            npf.rate(
-                r["Years"] * 2,
-                r["Coupon"] / 2,
-                -r["Dirty"],
-                100,
-            ) * 2 * 100
-        )
-    except:
-        return None
-
-df["YTM_Dirty"] = df.apply(calc_ytm_dirty, axis=1)
 
 # =====================================================
 # ALERT LOGIC
@@ -254,6 +289,8 @@ def alert_status(r):
 
     if side == "SELL":
         bid = r["Bid"]
+        if bid == 0:
+            return "—"
         if bid >= target:
             return "HIT"
         elif (target - bid) <= tol:
@@ -263,6 +300,8 @@ def alert_status(r):
 
     if side == "BUY":
         ask = r["Ask"]
+        if ask == 0:
+            return "—"
         if ask <= target:
             return "HIT"
         elif (ask - target) <= tol:
@@ -280,7 +319,7 @@ st.subheader("Market View")
 cols = [
     "Symbol", "Series", "Bid", "Ask", "LTP", "Volume",
     "Dirty", "Accrued", "Clean",
-    "Last Interest Paid", "YTM", "YTM_Dirty",
+    "Last Interest Paid", "YTM",
 ]
 
 st.dataframe(df[cols], use_container_width=True)
