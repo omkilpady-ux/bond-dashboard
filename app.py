@@ -7,6 +7,7 @@ from dateutil.relativedelta import relativedelta
 import base64
 import json
 from pathlib import Path
+import time
 
 # =====================================================
 # PERSISTENCE
@@ -70,6 +71,7 @@ series_filter = st.sidebar.multiselect(
 
 if st.sidebar.button("🔄 Refresh prices"):
     st.cache_data.clear()
+    st.rerun()
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("📊 Scanner Settings")
@@ -153,55 +155,93 @@ def play_hit_sound():
 # =====================================================
 @st.cache_data(ttl=24 * 3600)
 def load_master():
-    df = pd.read_csv("master_debt.csv")
-    df.columns = df.columns.str.strip().str.upper()
+    try:
+        df = pd.read_csv("master_debt.csv")
+        df.columns = df.columns.str.strip().str.upper()
 
-    df = df[["SYMBOL", "IP RATE", "REDEMPTION DATE"]]
+        df = df[["SYMBOL", "IP RATE", "REDEMPTION DATE"]]
 
-    df.rename(
-        columns={
-            "SYMBOL": "Symbol",
-            "IP RATE": "Coupon"
-        },
-        inplace=True,
-    )
+        df.rename(
+            columns={
+                "SYMBOL": "Symbol",
+                "IP RATE": "Coupon"
+            },
+            inplace=True,
+        )
 
-    df["REDEMPTION DATE"] = pd.to_datetime(
-        df["REDEMPTION DATE"],
-        dayfirst=True,
-        errors="coerce"
-    ).dt.date
+        df["REDEMPTION DATE"] = pd.to_datetime(
+            df["REDEMPTION DATE"],
+            dayfirst=True,
+            errors="coerce"
+        ).dt.date
 
-    df = df.dropna(subset=["REDEMPTION DATE"])
+        df = df.dropna(subset=["REDEMPTION DATE"])
 
-    df["Years"] = (
-        pd.to_datetime(df["REDEMPTION DATE"]) -
-        pd.to_datetime(SETTLEMENT)
-    ).dt.days / 365.25
+        df["Years"] = (
+            pd.to_datetime(df["REDEMPTION DATE"]) -
+            pd.to_datetime(SETTLEMENT)
+        ).dt.days / 365.25
 
-    return df[df["Years"] > 0]
+        return df[df["Years"] > 0]
+    except FileNotFoundError:
+        st.error("⚠️ master_debt.csv not found! Please ensure the file is in the same directory.")
+        return pd.DataFrame()
+    except Exception as e:
+        st.error(f"Error loading master data: {str(e)}")
+        return pd.DataFrame()
 
 # =====================================================
-# LIVE NSE DATA
+# LIVE NSE DATA - IMPROVED VERSION
 # =====================================================
 @st.cache_data(ttl=5)
 def load_live():
     rows = []
-
+    
     try:
         s = requests.Session()
+        
+        # Updated headers to mimic a real browser more closely
         s.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Accept": "application/json",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "*/*",
             "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Connection": "keep-alive",
+            "Referer": "https://www.nseindia.com/market-data/bonds-traded-in-capital-market",
         })
         
-        s.get("https://www.nseindia.com", timeout=15)
-
+        # First request to get cookies
+        homepage_resp = s.get("https://www.nseindia.com", timeout=15)
+        
+        # Small delay to mimic human behavior
+        time.sleep(1)
+        
+        # Try the API endpoint
         url = "https://www.nseindia.com/api/liveBonds-traded-on-cm?type=gsec"
         resp = s.get(url, timeout=15)
         
-        data = resp.json().get("data", [])
+        # Check if we got a valid response
+        if resp.status_code != 200:
+            raise Exception(f"NSE returned status code {resp.status_code}")
+        
+        # Check if response has content
+        if not resp.text or resp.text.strip() == "":
+            raise Exception("NSE returned empty response")
+        
+        # Try to parse JSON
+        try:
+            json_data = resp.json()
+        except json.JSONDecodeError as e:
+            # If JSON parsing fails, it might be an HTML error page
+            if "<html" in resp.text.lower():
+                raise Exception("NSE returned HTML instead of JSON (possible rate limit or block)")
+            else:
+                raise Exception(f"Invalid JSON from NSE: {str(e)}")
+        
+        data = json_data.get("data", [])
+        
+        if not data:
+            raise Exception("NSE returned valid JSON but no bond data")
 
         for d in data:
             if not isinstance(d, dict):
@@ -221,8 +261,21 @@ def load_live():
                     "Volume": d.get("totalTradedVolume") or 0,
                 }
             )
+            
+    except requests.exceptions.Timeout:
+        st.error("⏱️ NSE API timeout - the server took too long to respond. Try refreshing in a few moments.")
+    except requests.exceptions.ConnectionError:
+        st.error("🔌 Connection error - could not reach NSE servers. Check your internet connection.")
     except Exception as e:
-        st.error(f"NSE API Error: {str(e)}")
+        error_msg = str(e)
+        if "Expecting value" in error_msg:
+            st.error("🚫 NSE API Error: The server returned invalid data. This usually means:\n"
+                    "- NSE may be blocking automated requests\n"
+                    "- The API endpoint may have changed\n"
+                    "- NSE servers are experiencing issues\n\n"
+                    "The dashboard will show master data without live prices. Try refreshing in a few minutes.")
+        else:
+            st.error(f"❌ NSE API Error: {error_msg}")
 
     return pd.DataFrame(rows)
 
@@ -237,7 +290,7 @@ if master.empty:
     st.stop()
 
 if live.empty:
-    st.warning("⚠️ Live data unavailable from NSE. Showing master data only. Click 'Refresh prices' to retry.")
+    st.warning("⚠️ Live data unavailable from NSE. Showing master data only. Click '🔄 Refresh prices' to retry.")
     df = master.copy()
     df["Series"] = ""
     df["Bid"] = 0
@@ -247,7 +300,8 @@ if live.empty:
     df["Volume"] = 0
 else:
     df = live.merge(master, on="Symbol", how="left")
-    df = df[df["Series"].isin(series_filter)]
+    if series_filter:
+        df = df[df["Series"].isin(series_filter)]
     df = df.dropna(subset=["Coupon", "Years"])
 
 # =====================================================
@@ -411,7 +465,7 @@ def generate_opportunities(df, threshold, vol_mult, min_vol):
                     "Ask YTM": r["Ask YTM"],
                     "Signal": "🟢 BUY",
                     "Reason": f"Ask YTM +{diff:.2f}% vs 7D avg",
-                    "Priority": diff  # for sorting
+                    "Priority": diff
                 })
         
         # Low Bid YTM = SELL opportunity
@@ -517,19 +571,6 @@ def alert_status(r):
 # MARKET VIEW
 # =====================================================
 st.subheader("Market View")
-
-# Add color coding helper
-def color_ytm(val, avg, threshold):
-    """Color code YTM cells based on deviation from average"""
-    if pd.isna(val) or not avg:
-        return ''
-    
-    diff = val - avg
-    if diff > threshold:
-        return 'background-color: #d4edda'  # Green (buy)
-    elif diff < -threshold:
-        return 'background-color: #f8d7da'  # Red (sell)
-    return ''
 
 cols = [
     "Symbol", "Series", "Bid", "Ask", "LTP", "Volume",
