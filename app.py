@@ -8,14 +8,12 @@ import base64
 import json
 from pathlib import Path
 import time
-import random
 
 # =====================================================
 # PERSISTENCE
 # =====================================================
 STATE_FILE = Path("user_state.json")
 HISTORY_FILE = Path("yield_history.json")
-MANUAL_PRICES_FILE = Path("manual_prices.json")
 
 def load_persistent_state():
     if STATE_FILE.exists():
@@ -43,16 +41,6 @@ def save_yield_history(history):
     with open(HISTORY_FILE, "w") as f:
         json.dump(history, f)
 
-def load_manual_prices():
-    if MANUAL_PRICES_FILE.exists():
-        with open(MANUAL_PRICES_FILE, "r") as f:
-            return json.load(f)
-    return {}
-
-def save_manual_prices(prices):
-    with open(MANUAL_PRICES_FILE, "w") as f:
-        json.dump(prices, f)
-
 # =====================================================
 # PAGE SETUP
 # =====================================================
@@ -68,20 +56,12 @@ if "initialized" not in st.session_state:
     st.session_state.watchlist = persisted.get("watchlist", [])
     st.session_state.alerts = persisted.get("alerts", {})
     st.session_state.last_alert_state = {}
-    st.session_state.manual_prices = load_manual_prices()
     st.session_state.initialized = True
 
 # =====================================================
 # SIDEBAR - SCANNER SETTINGS
 # =====================================================
 st.sidebar.header("Controls")
-
-# Data source selector
-data_source = st.sidebar.radio(
-    "Data Source",
-    ["Auto (Try NSE)", "Manual Entry Only"],
-    help="NSE often blocks automated requests. Use 'Manual Entry' if Auto fails."
-)
 
 series_filter = st.sidebar.multiselect(
     "Series",
@@ -203,187 +183,141 @@ def load_master():
         ).dt.days / 365.25
 
         return df[df["Years"] > 0]
-    except FileNotFoundError:
-        st.error("⚠️ master_debt.csv not found! Please ensure the file is in the same directory.")
-        return pd.DataFrame()
     except Exception as e:
         st.error(f"Error loading master data: {str(e)}")
         return pd.DataFrame()
 
 # =====================================================
-# LIVE NSE DATA - ENHANCED WITH MULTIPLE STRATEGIES
+# LIVE NSE DATA - SUPER AGGRESSIVE VERSION
 # =====================================================
 @st.cache_data(ttl=5)
-def load_live_nse():
-    """Try multiple strategies to fetch NSE data"""
+def load_live():
+    """Multiple fallback strategies to get NSE data"""
     rows = []
     
-    # Strategy 1: Standard API with rotating user agents
-    user_agents = [
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    ]
-    
-    try:
-        s = requests.Session()
-        
-        s.headers.update({
-            "User-Agent": random.choice(user_agents),
-            "Accept": "application/json, text/plain, */*",
-            "Accept-Language": "en-US,en;q=0.9",
+    # Try multiple times with different approaches
+    strategies = [
+        # Strategy 1: Firefox on Windows
+        {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+            "Accept-Language": "en-US,en;q=0.5",
             "Accept-Encoding": "gzip, deflate, br",
+            "X-Requested-With": "XMLHttpRequest",
+            "DNT": "1",
             "Connection": "keep-alive",
             "Referer": "https://www.nseindia.com/market-data/bonds-traded-in-capital-market",
             "Sec-Fetch-Dest": "empty",
             "Sec-Fetch-Mode": "cors",
             "Sec-Fetch-Site": "same-origin",
-        })
-        
-        # First get cookies from homepage
-        s.get("https://www.nseindia.com", timeout=10)
-        time.sleep(random.uniform(1, 2))
-        
-        # Try main API
-        url = "https://www.nseindia.com/api/liveBonds-traded-on-cm?type=gsec"
-        resp = s.get(url, timeout=10)
-        
-        if resp.status_code == 200 and resp.text.strip():
-            try:
-                data = resp.json().get("data", [])
-                
-                for d in data:
-                    if not isinstance(d, dict):
-                        continue
-
-                    last_px = d.get("lastPrice") or 0
-                    avg_px = d.get("averagePrice") or 0
-
-                    rows.append({
-                        "Symbol": d.get("symbol"),
-                        "Series": d.get("series"),
-                        "Bid": d.get("buyPrice1") or 0,
-                        "Ask": d.get("sellPrice1") or 0,
-                        "LTP": last_px,
-                        "Dirty": last_px if last_px != 0 else avg_px,
-                        "Volume": d.get("totalTradedVolume") or 0,
-                    })
-                
-                if rows:
-                    return pd.DataFrame(rows), None
-                    
-            except json.JSONDecodeError:
-                pass
-        
-        # If we get here, API failed
-        error_msg = f"NSE API returned status {resp.status_code}"
-        if resp.status_code == 403:
-            error_msg = "NSE blocked the request (403 Forbidden). Use Manual Entry mode or try again later."
-        elif resp.status_code == 429:
-            error_msg = "NSE rate limit exceeded (429). Wait a few minutes before trying again."
-            
-        return pd.DataFrame(), error_msg
-        
-    except requests.exceptions.Timeout:
-        return pd.DataFrame(), "NSE API timeout. Server is slow or unreachable."
-    except requests.exceptions.ConnectionError:
-        return pd.DataFrame(), "Connection error. Check your internet connection."
-    except Exception as e:
-        return pd.DataFrame(), f"Unexpected error: {str(e)}"
-
-# =====================================================
-# MANUAL PRICE ENTRY SECTION
-# =====================================================
-def show_manual_entry_section():
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("📝 Manual Price Entry")
+        },
+        # Strategy 2: Chrome on Mac
+        {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/json",
+            "Accept-Language": "en-GB,en-US;q=0.9,en;q=0.8",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Connection": "keep-alive",
+            "Referer": "https://www.nseindia.com/",
+            "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+            "Sec-Ch-Ua-Mobile": "?0",
+            "Sec-Ch-Ua-Platform": '"macOS"',
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-origin",
+        },
+        # Strategy 3: Edge on Windows
+        {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0",
+            "Accept": "*/*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Referer": "https://www.nseindia.com/market-data/bonds-traded-in-capital-market",
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-origin",
+        },
+    ]
     
-    with st.sidebar.expander("Enter prices manually", expanded=False):
-        st.markdown("**Copy prices from NSE website and paste here:**")
-        
-        manual_symbol = st.text_input("Symbol (e.g., GB2025)", key="manual_sym")
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            manual_bid = st.number_input("Bid", min_value=0.0, format="%.2f", key="manual_bid")
-            manual_ltp = st.number_input("LTP", min_value=0.0, format="%.2f", key="manual_ltp")
-        with col2:
-            manual_ask = st.number_input("Ask", min_value=0.0, format="%.2f", key="manual_ask")
-            manual_vol = st.number_input("Volume", min_value=0, step=1, key="manual_vol")
-        
-        if st.button("💾 Save Price", key="save_manual"):
-            if manual_symbol:
-                st.session_state.manual_prices[manual_symbol.upper()] = {
-                    "Bid": manual_bid,
-                    "Ask": manual_ask,
-                    "LTP": manual_ltp,
-                    "Volume": manual_vol,
-                    "timestamp": datetime.now().isoformat()
-                }
-                save_manual_prices(st.session_state.manual_prices)
-                st.success(f"✅ Saved prices for {manual_symbol}")
-                st.rerun()
-        
-        if st.session_state.manual_prices:
-            st.markdown("**Recently entered:**")
-            for sym in list(st.session_state.manual_prices.keys())[-3:]:
-                data = st.session_state.manual_prices[sym]
-                st.caption(f"**{sym}**: LTP {data['LTP']}")
+    last_error = None
+    
+    for strategy_num, headers in enumerate(strategies, 1):
+        try:
+            s = requests.Session()
+            s.headers.update(headers)
+            
+            # Visit homepage first
+            try:
+                home = s.get("https://www.nseindia.com", timeout=8)
+                if home.status_code == 200:
+                    time.sleep(0.5)  # Brief pause
+            except:
+                pass  # Continue even if homepage fails
+            
+            # Try API
+            url = "https://www.nseindia.com/api/liveBonds-traded-on-cm?type=gsec"
+            resp = s.get(url, timeout=10)
+            
+            if resp.status_code == 200:
+                try:
+                    data = resp.json().get("data", [])
+                    
+                    if data:
+                        for d in data:
+                            if not isinstance(d, dict):
+                                continue
 
-# Show manual entry in sidebar
-show_manual_entry_section()
+                            last_px = d.get("lastPrice") or 0
+                            avg_px = d.get("averagePrice") or 0
+
+                            rows.append({
+                                "Symbol": d.get("symbol"),
+                                "Series": d.get("series"),
+                                "Bid": d.get("buyPrice1") or 0,
+                                "Ask": d.get("sellPrice1") or 0,
+                                "LTP": last_px,
+                                "Dirty": last_px if last_px != 0 else avg_px,
+                                "Volume": d.get("totalTradedVolume") or 0,
+                            })
+                        
+                        if rows:
+                            return pd.DataFrame(rows)
+                except:
+                    pass
+            
+            last_error = f"Status {resp.status_code}"
+            
+        except Exception as e:
+            last_error = str(e)
+            continue
+    
+    # All strategies failed
+    if last_error:
+        if "403" in str(last_error):
+            st.error("🚫 NSE is blocking all connection attempts (403). This happens sometimes.\n\n"
+                    "**Quick fixes to try:**\n"
+                    "1. Wait 15-30 minutes and try again\n"
+                    "2. Restart your computer (clears your IP reputation)\n"
+                    "3. Try using mobile hotspot instead of WiFi\n"
+                    "4. Use a VPN (change your IP address)\n\n"
+                    "**For now:** Dashboard shows master data only. All calculations still work!")
+        else:
+            st.warning(f"⚠️ Could not fetch NSE data: {last_error}")
+    
+    return pd.DataFrame()
 
 # =====================================================
 # LOAD DATA
 # =====================================================
 master = load_master()
+live = load_live()
 
 if master.empty:
     st.error("Master data file (master_debt.csv) not found or empty!")
     st.stop()
 
-# Try to get live data based on selected source
-nse_error = None
-if data_source == "Auto (Try NSE)":
-    live_df, nse_error = load_live_nse()
-else:
-    live_df = pd.DataFrame()
-    nse_error = "Manual mode selected - NSE API not queried"
-
-# Merge manual prices
-manual_rows = []
-for symbol, data in st.session_state.manual_prices.items():
-    manual_rows.append({
-        "Symbol": symbol,
-        "Series": "GS",  # Default to GS
-        "Bid": data["Bid"],
-        "Ask": data["Ask"],
-        "LTP": data["LTP"],
-        "Dirty": data["LTP"] if data["LTP"] > 0 else data["Bid"],
-        "Volume": data["Volume"],
-    })
-
-manual_df = pd.DataFrame(manual_rows)
-
-# Combine live and manual data
-if not live_df.empty and not manual_df.empty:
-    # Prefer manual prices over API prices for same symbols
-    live_df = live_df[~live_df["Symbol"].isin(manual_df["Symbol"])]
-    combined_live = pd.concat([live_df, manual_df], ignore_index=True)
-elif not manual_df.empty:
-    combined_live = manual_df
-else:
-    combined_live = live_df
-
-# Show status message
-if nse_error and data_source == "Auto (Try NSE)":
-    if manual_df.empty:
-        st.error(f"❌ {nse_error}\n\n**Solution:** Switch to 'Manual Entry Only' mode in sidebar and enter prices manually from NSE website.")
-    else:
-        st.warning(f"⚠️ {nse_error}\n\nShowing manually entered prices only.")
-
-if combined_live.empty:
-    st.warning("⚠️ No live data available. Showing master data only.\n\n**To get prices:** Use 'Manual Entry' in sidebar to enter prices from NSE website.")
+if live.empty:
+    st.info("ℹ️ Live prices unavailable. Showing master data. Try 'Refresh prices' or wait a bit and try again.")
     df = master.copy()
     df["Series"] = ""
     df["Bid"] = 0
@@ -392,7 +326,8 @@ if combined_live.empty:
     df["Dirty"] = 0
     df["Volume"] = 0
 else:
-    df = combined_live.merge(master, on="Symbol", how="left")
+    st.success(f"✅ Live data loaded: {len(live)} bonds")
+    df = live.merge(master, on="Symbol", how="left")
     if series_filter:
         df = df[df["Series"].isin(series_filter)]
     df = df.dropna(subset=["Coupon", "Years"])
@@ -782,31 +717,3 @@ if st.session_state.watchlist:
         save_persistent_state()
 else:
     st.info("Watchlist empty.")
-
-# =====================================================
-# HELP SECTION
-# =====================================================
-with st.expander("ℹ️ Help - NSE Access Issues"):
-    st.markdown("""
-    ### Why NSE blocks automated requests:
-    NSE's website actively blocks automated scripts to prevent overload. This is normal and expected.
-    
-    ### Solutions:
-    
-    **Option 1: Manual Entry (Recommended)**
-    1. Set Data Source to "Manual Entry Only" in sidebar
-    2. Open NSE website manually in browser: https://www.nseindia.com/market-data/bonds-traded-in-capital-market
-    3. Copy prices for bonds you care about
-    4. Enter them in the "Manual Price Entry" section in sidebar
-    
-    **Option 2: Try Auto mode at different times**
-    - NSE blocking varies by time of day
-    - Try early morning or late evening
-    - Wait 10-15 minutes between attempts
-    
-    **Option 3: Use a VPN**
-    - Sometimes changing your IP helps
-    - Not guaranteed to work
-    
-    The manual entry method is most reliable and lets you track exactly the bonds you care about!
-    """)
