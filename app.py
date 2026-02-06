@@ -7,6 +7,7 @@ from dateutil.relativedelta import relativedelta
 import base64
 import json
 from pathlib import Path
+import time
 
 # =====================================================
 # PERSISTENCE
@@ -191,16 +192,30 @@ def load_live():
     try:
         s = requests.Session()
         s.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
             "Accept": "application/json",
             "Accept-Language": "en-US,en;q=0.9",
+            "Referer": "https://www.nseindia.com/market-data/bonds-traded-in-cm",
+            "Connection": "keep-alive",
         })
-        
+
+        # REQUIRED to set NSE cookies
         s.get("https://www.nseindia.com", timeout=15)
+        time.sleep(1)
 
         url = "https://www.nseindia.com/api/liveBonds-traded-on-cm?type=gsec"
         resp = s.get(url, timeout=15)
-        
+
+        # NSE bot-block / outage
+        if resp.status_code != 200:
+            return pd.DataFrame()
+
+        text = resp.text.strip()
+
+        # NSE returns HTML or empty string when blocked
+        if not text or not text.startswith("{"):
+            return pd.DataFrame()
+
         data = resp.json().get("data", [])
 
         for d in data:
@@ -210,21 +225,22 @@ def load_live():
             last_px = d.get("lastPrice") or 0
             avg_px = d.get("averagePrice") or 0
 
-            rows.append(
-                {
-                    "Symbol": d.get("symbol"),
-                    "Series": d.get("series"),
-                    "Bid": d.get("buyPrice1") or 0,
-                    "Ask": d.get("sellPrice1") or 0,
-                    "LTP": last_px,
-                    "Dirty": last_px if last_px != 0 else avg_px,
-                    "Volume": d.get("totalTradedVolume") or 0,
-                }
-            )
-    except Exception as e:
-        st.error(f"NSE API Error: {str(e)}")
+            rows.append({
+                "Symbol": d.get("symbol"),
+                "Series": d.get("series"),
+                "Bid": d.get("buyPrice1") or 0,
+                "Ask": d.get("sellPrice1") or 0,
+                "LTP": last_px,
+                "Dirty": last_px if last_px != 0 else avg_px,
+                "Volume": d.get("totalTradedVolume") or 0,
+            })
+
+    except Exception:
+        # NEVER crash the app
+        return pd.DataFrame()
 
     return pd.DataFrame(rows)
+
 
 # =====================================================
 # LOAD DATA
