@@ -7,7 +7,6 @@ from dateutil.relativedelta import relativedelta
 import base64
 import json
 from pathlib import Path
-import time
 
 # =====================================================
 # PERSISTENCE
@@ -71,7 +70,6 @@ series_filter = st.sidebar.multiselect(
 
 if st.sidebar.button("🔄 Refresh prices"):
     st.cache_data.clear()
-    st.rerun()
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("📊 Scanner Settings")
@@ -155,156 +153,78 @@ def play_hit_sound():
 # =====================================================
 @st.cache_data(ttl=24 * 3600)
 def load_master():
-    try:
-        df = pd.read_csv("master_debt.csv")
-        df.columns = df.columns.str.strip().str.upper()
+    df = pd.read_csv("master_debt.csv")
+    df.columns = df.columns.str.strip().str.upper()
 
-        df = df[["SYMBOL", "IP RATE", "REDEMPTION DATE"]]
+    df = df[["SYMBOL", "IP RATE", "REDEMPTION DATE"]]
 
-        df.rename(
-            columns={
-                "SYMBOL": "Symbol",
-                "IP RATE": "Coupon"
-            },
-            inplace=True,
-        )
+    df.rename(
+        columns={
+            "SYMBOL": "Symbol",
+            "IP RATE": "Coupon"
+        },
+        inplace=True,
+    )
 
-        df["REDEMPTION DATE"] = pd.to_datetime(
-            df["REDEMPTION DATE"],
-            dayfirst=True,
-            errors="coerce"
-        ).dt.date
+    df["REDEMPTION DATE"] = pd.to_datetime(
+        df["REDEMPTION DATE"],
+        dayfirst=True,
+        errors="coerce"
+    ).dt.date
 
-        df = df.dropna(subset=["REDEMPTION DATE"])
+    df = df.dropna(subset=["REDEMPTION DATE"])
 
-        df["Years"] = (
-            pd.to_datetime(df["REDEMPTION DATE"]) -
-            pd.to_datetime(SETTLEMENT)
-        ).dt.days / 365.25
+    df["Years"] = (
+        pd.to_datetime(df["REDEMPTION DATE"]) -
+        pd.to_datetime(SETTLEMENT)
+    ).dt.days / 365.25
 
-        return df[df["Years"] > 0]
-    except Exception as e:
-        st.error(f"Error loading master data: {str(e)}")
-        return pd.DataFrame()
+    return df[df["Years"] > 0]
 
 # =====================================================
-# LIVE NSE DATA - SUPER AGGRESSIVE VERSION
+# LIVE NSE DATA
 # =====================================================
 @st.cache_data(ttl=5)
 def load_live():
-    """Multiple fallback strategies to get NSE data"""
     rows = []
-    
-    # Try multiple times with different approaches
-    strategies = [
-        # Strategy 1: Firefox on Windows
-        {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
-            "Accept": "application/json, text/javascript, */*; q=0.01",
-            "Accept-Language": "en-US,en;q=0.5",
-            "Accept-Encoding": "gzip, deflate, br",
-            "X-Requested-With": "XMLHttpRequest",
-            "DNT": "1",
-            "Connection": "keep-alive",
-            "Referer": "https://www.nseindia.com/market-data/bonds-traded-in-capital-market",
-            "Sec-Fetch-Dest": "empty",
-            "Sec-Fetch-Mode": "cors",
-            "Sec-Fetch-Site": "same-origin",
-        },
-        # Strategy 2: Chrome on Mac
-        {
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+
+    try:
+        s = requests.Session()
+        s.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "Accept": "application/json",
-            "Accept-Language": "en-GB,en-US;q=0.9,en;q=0.8",
-            "Accept-Encoding": "gzip, deflate, br",
-            "Connection": "keep-alive",
-            "Referer": "https://www.nseindia.com/",
-            "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
-            "Sec-Ch-Ua-Mobile": "?0",
-            "Sec-Ch-Ua-Platform": '"macOS"',
-            "Sec-Fetch-Dest": "empty",
-            "Sec-Fetch-Mode": "cors",
-            "Sec-Fetch-Site": "same-origin",
-        },
-        # Strategy 3: Edge on Windows
-        {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0",
-            "Accept": "*/*",
             "Accept-Language": "en-US,en;q=0.9",
-            "Accept-Encoding": "gzip, deflate, br",
-            "Referer": "https://www.nseindia.com/market-data/bonds-traded-in-capital-market",
-            "Sec-Fetch-Dest": "empty",
-            "Sec-Fetch-Mode": "cors",
-            "Sec-Fetch-Site": "same-origin",
-        },
-    ]
-    
-    last_error = None
-    
-    for strategy_num, headers in enumerate(strategies, 1):
-        try:
-            s = requests.Session()
-            s.headers.update(headers)
-            
-            # Visit homepage first
-            try:
-                home = s.get("https://www.nseindia.com", timeout=8)
-                if home.status_code == 200:
-                    time.sleep(0.5)  # Brief pause
-            except:
-                pass  # Continue even if homepage fails
-            
-            # Try API
-            url = "https://www.nseindia.com/api/liveBonds-traded-on-cm?type=gsec"
-            resp = s.get(url, timeout=10)
-            
-            if resp.status_code == 200:
-                try:
-                    data = resp.json().get("data", [])
-                    
-                    if data:
-                        for d in data:
-                            if not isinstance(d, dict):
-                                continue
+        })
+        
+        s.get("https://www.nseindia.com", timeout=15)
 
-                            last_px = d.get("lastPrice") or 0
-                            avg_px = d.get("averagePrice") or 0
+        url = "https://www.nseindia.com/api/liveBonds-traded-on-cm?type=gsec"
+        resp = s.get(url, timeout=15)
+        
+        data = resp.json().get("data", [])
 
-                            rows.append({
-                                "Symbol": d.get("symbol"),
-                                "Series": d.get("series"),
-                                "Bid": d.get("buyPrice1") or 0,
-                                "Ask": d.get("sellPrice1") or 0,
-                                "LTP": last_px,
-                                "Dirty": last_px if last_px != 0 else avg_px,
-                                "Volume": d.get("totalTradedVolume") or 0,
-                            })
-                        
-                        if rows:
-                            return pd.DataFrame(rows)
-                except:
-                    pass
-            
-            last_error = f"Status {resp.status_code}"
-            
-        except Exception as e:
-            last_error = str(e)
-            continue
-    
-    # All strategies failed
-    if last_error:
-        if "403" in str(last_error):
-            st.error("🚫 NSE is blocking all connection attempts (403). This happens sometimes.\n\n"
-                    "**Quick fixes to try:**\n"
-                    "1. Wait 15-30 minutes and try again\n"
-                    "2. Restart your computer (clears your IP reputation)\n"
-                    "3. Try using mobile hotspot instead of WiFi\n"
-                    "4. Use a VPN (change your IP address)\n\n"
-                    "**For now:** Dashboard shows master data only. All calculations still work!")
-        else:
-            st.warning(f"⚠️ Could not fetch NSE data: {last_error}")
-    
-    return pd.DataFrame()
+        for d in data:
+            if not isinstance(d, dict):
+                continue
+
+            last_px = d.get("lastPrice") or 0
+            avg_px = d.get("averagePrice") or 0
+
+            rows.append(
+                {
+                    "Symbol": d.get("symbol"),
+                    "Series": d.get("series"),
+                    "Bid": d.get("buyPrice1") or 0,
+                    "Ask": d.get("sellPrice1") or 0,
+                    "LTP": last_px,
+                    "Dirty": last_px if last_px != 0 else avg_px,
+                    "Volume": d.get("totalTradedVolume") or 0,
+                }
+            )
+    except Exception as e:
+        st.error(f"NSE API Error: {str(e)}")
+
+    return pd.DataFrame(rows)
 
 # =====================================================
 # LOAD DATA
@@ -317,7 +237,7 @@ if master.empty:
     st.stop()
 
 if live.empty:
-    st.info("ℹ️ Live prices unavailable. Showing master data. Try 'Refresh prices' or wait a bit and try again.")
+    st.warning("⚠️ Live data unavailable from NSE. Showing master data only. Click 'Refresh prices' to retry.")
     df = master.copy()
     df["Series"] = ""
     df["Bid"] = 0
@@ -326,10 +246,8 @@ if live.empty:
     df["Dirty"] = 0
     df["Volume"] = 0
 else:
-    st.success(f"✅ Live data loaded: {len(live)} bonds")
     df = live.merge(master, on="Symbol", how="left")
-    if series_filter:
-        df = df[df["Series"].isin(series_filter)]
+    df = df[df["Series"].isin(series_filter)]
     df = df.dropna(subset=["Coupon", "Years"])
 
 # =====================================================
@@ -493,7 +411,7 @@ def generate_opportunities(df, threshold, vol_mult, min_vol):
                     "Ask YTM": r["Ask YTM"],
                     "Signal": "🟢 BUY",
                     "Reason": f"Ask YTM +{diff:.2f}% vs 7D avg",
-                    "Priority": diff
+                    "Priority": diff  # for sorting
                 })
         
         # Low Bid YTM = SELL opportunity
@@ -599,6 +517,19 @@ def alert_status(r):
 # MARKET VIEW
 # =====================================================
 st.subheader("Market View")
+
+# Add color coding helper
+def color_ytm(val, avg, threshold):
+    """Color code YTM cells based on deviation from average"""
+    if pd.isna(val) or not avg:
+        return ''
+    
+    diff = val - avg
+    if diff > threshold:
+        return 'background-color: #d4edda'  # Green (buy)
+    elif diff < -threshold:
+        return 'background-color: #f8d7da'  # Red (sell)
+    return ''
 
 cols = [
     "Symbol", "Series", "Bid", "Ask", "LTP", "Volume",
