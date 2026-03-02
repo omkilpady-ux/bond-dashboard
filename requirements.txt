@@ -6,3 +6,4 @@ numpy-financial
 python-dateutil
 matplotlib
 days360
+curl-cffi
