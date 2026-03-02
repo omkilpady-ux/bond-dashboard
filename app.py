@@ -190,56 +190,94 @@ def load_live():
     rows = []
 
     try:
+        from curl_cffi import requests as cffi_requests
+        s = cffi_requests.Session(impersonate="chrome120")
+        s.headers.update({
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "en-IN,en-US;q=0.9,en;q=0.8",
+            "Referer": "https://www.nseindia.com/market-data/bonds-traded-in-capital-market",
+        })
+        s.get("https://www.nseindia.com", timeout=15)
+        time.sleep(1.5)
+        s.get("https://www.nseindia.com/market-data/bonds-traded-in-capital-market", timeout=15)
+        time.sleep(1)
+        resp = s.get("https://www.nseindia.com/api/liveBonds-traded-on-cm?type=gsec", timeout=15)
+        if resp.status_code == 200:
+            text = resp.text.strip()
+            if text and text.startswith("{"):
+                data = resp.json().get("data", [])
+                for d in data:
+                    if not isinstance(d, dict):
+                        continue
+                    last_px = d.get("lastPrice") or 0
+                    avg_px = d.get("averagePrice") or 0
+                    rows.append({
+                        "Symbol": d.get("symbol"),
+                        "Series": d.get("series"),
+                        "Bid": d.get("buyPrice1") or 0,
+                        "Ask": d.get("sellPrice1") or 0,
+                        "LTP": last_px,
+                        "Dirty": last_px if last_px != 0 else avg_px,
+                        "Volume": d.get("totalTradedVolume") or 0,
+                    })
+                if rows:
+                    return pd.DataFrame(rows)
+    except Exception:
+        pass
+
+    try:
+        import requests
         s = requests.Session()
         s.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-            "Accept": "application/json",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Referer": "https://www.nseindia.com/market-data/bonds-traded-in-cm",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-IN,en-US;q=0.9,en;q=0.8",
+            "Accept-Encoding": "gzip, deflate, br",
             "Connection": "keep-alive",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none",
         })
-
-        # REQUIRED to set NSE cookies
         s.get("https://www.nseindia.com", timeout=15)
-        time.sleep(1)
-
-        url = "https://www.nseindia.com/api/liveBonds-traded-on-cm?type=gsec"
-        resp = s.get(url, timeout=15)
-
-        # NSE bot-block / outage
-        if resp.status_code != 200:
-            return pd.DataFrame()
-
-        text = resp.text.strip()
-
-        # NSE returns HTML or empty string when blocked
-        if not text or not text.startswith("{"):
-            return pd.DataFrame()
-
-        data = resp.json().get("data", [])
-
-        for d in data:
-            if not isinstance(d, dict):
-                continue
-
-            last_px = d.get("lastPrice") or 0
-            avg_px = d.get("averagePrice") or 0
-
-            rows.append({
-                "Symbol": d.get("symbol"),
-                "Series": d.get("series"),
-                "Bid": d.get("buyPrice1") or 0,
-                "Ask": d.get("sellPrice1") or 0,
-                "LTP": last_px,
-                "Dirty": last_px if last_px != 0 else avg_px,
-                "Volume": d.get("totalTradedVolume") or 0,
-            })
-
+        time.sleep(2)
+        s.headers.update({
+            "Referer": "https://www.nseindia.com/",
+            "Sec-Fetch-Site": "same-origin",
+        })
+        s.get("https://www.nseindia.com/market-data/bonds-traded-in-capital-market", timeout=15)
+        time.sleep(1.5)
+        s.headers.update({
+            "Accept": "application/json, text/plain, */*",
+            "Referer": "https://www.nseindia.com/market-data/bonds-traded-in-capital-market",
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "X-Requested-With": "XMLHttpRequest",
+        })
+        resp = s.get("https://www.nseindia.com/api/liveBonds-traded-on-cm?type=gsec", timeout=15)
+        if resp.status_code == 200:
+            text = resp.text.strip()
+            if text and text.startswith("{"):
+                data = resp.json().get("data", [])
+                for d in data:
+                    if not isinstance(d, dict):
+                        continue
+                    last_px = d.get("lastPrice") or 0
+                    avg_px = d.get("averagePrice") or 0
+                    rows.append({
+                        "Symbol": d.get("symbol"),
+                        "Series": d.get("series"),
+                        "Bid": d.get("buyPrice1") or 0,
+                        "Ask": d.get("sellPrice1") or 0,
+                        "LTP": last_px,
+                        "Dirty": last_px if last_px != 0 else avg_px,
+                        "Volume": d.get("totalTradedVolume") or 0,
+                    })
+                if rows:
+                    return pd.DataFrame(rows)
     except Exception:
-        # NEVER crash the app
-        return pd.DataFrame()
+        pass
 
-    return pd.DataFrame(rows)
+    return pd.DataFrame()
 
 
 # =====================================================
